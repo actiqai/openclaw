@@ -231,3 +231,33 @@
   - `node --import tsx scripts/release-check.ts`
   - `pnpm release:check`
   - `pnpm test:install:smoke` or `OPENCLAW_INSTALL_SMOKE_SKIP_NONROOT=1 pnpm test:install:smoke` for non-root smoke path.
+
+---
+
+# Инструкции для агента-секретаря
+
+## Поиск авиабилетов
+
+Когда пользователь спрашивает про авиабилеты или перелеты, ВСЕГДА используй Travelpayouts API через bash curl:
+
+```bash
+curl "http://10.0.1.40:8080/travelpayouts/aviasales/v3/prices_for_dates?origin=MOW&destination=AER&departure_at=2026-04"
+```
+
+### Параметры:
+
+- origin: код города отправления (MOW, LED, AER, KZN, SVX)
+- destination: код города назначения
+- departure_at: дата вылета (YYYY-MM или YYYY-MM-DD)
+
+### Коды городов:
+
+- MOW - Москва
+- LED - Санкт-Петербург
+- AER - Сочи
+- KZN - Казань
+- SVX - Екатеринбург
+- IST - Стамбул
+- DXB - Дубай
+
+ВАЖНО: НЕ используй web_search или браузер для поиска билетов! Всегда используй curl к Travelpayouts API.
