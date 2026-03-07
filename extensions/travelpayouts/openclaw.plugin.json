@@ -1,0 +1,13 @@
+{
+  "id": "travelpayouts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "gatewayBaseUrl": {
+        "type": "string",
+        "description": "Base URL of the actiq-gateway proxy (e.g. http://10.0.1.40:8080)"
+      }
+    }
+  }
+}

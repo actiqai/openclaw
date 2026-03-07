@@ -22,7 +22,8 @@ const SEARCH_PROVIDERS = ["brave", "perplexity", "grok"] as const;
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
-const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const DEFAULT_BRAVE_BASE_URL = "https://api.search.brave.com";
+const BRAVE_SEARCH_PATH = "/res/v1/web/search";
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 const DEFAULT_PERPLEXITY_MODEL = "perplexity/sonar-pro";
@@ -186,6 +187,15 @@ function resolveSearchApiKey(search?: WebSearchConfig): string | undefined {
       : "";
   const fromEnv = normalizeSecretInput(process.env.BRAVE_API_KEY);
   return fromConfig || fromEnv || undefined;
+}
+
+function resolveBraveBaseUrl(search?: WebSearchConfig): string {
+  const fromConfig =
+    search && "baseUrl" in search && typeof search.baseUrl === "string"
+      ? search.baseUrl.trim().replace(/\/$/, "")
+      : "";
+  const fromEnv = process.env.BRAVE_BASE_URL?.trim().replace(/\/$/, "") ?? "";
+  return fromConfig || fromEnv || DEFAULT_BRAVE_BASE_URL;
 }
 
 function missingSearchKeyPayload(provider: (typeof SEARCH_PROVIDERS)[number]) {
@@ -566,10 +576,11 @@ async function runWebSearch(params: {
   perplexityModel?: string;
   grokModel?: string;
   grokInlineCitations?: boolean;
+  braveBaseUrl?: string;
 }): Promise<Record<string, unknown>> {
   const cacheKey = normalizeCacheKey(
     params.provider === "brave"
-      ? `${params.provider}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}`
+      ? `${params.provider}:${params.braveBaseUrl ?? DEFAULT_BRAVE_BASE_URL}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}`
       : params.provider === "perplexity"
         ? `${params.provider}:${params.query}:${params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL}:${params.perplexityModel ?? DEFAULT_PERPLEXITY_MODEL}:${params.freshness || "default"}`
         : `${params.provider}:${params.query}:${params.grokModel ?? DEFAULT_GROK_MODEL}:${String(params.grokInlineCitations ?? false)}`,
@@ -641,7 +652,8 @@ async function runWebSearch(params: {
     throw new Error("Unsupported web search provider.");
   }
 
-  const url = new URL(BRAVE_SEARCH_ENDPOINT);
+  const braveBase = params.braveBaseUrl ?? DEFAULT_BRAVE_BASE_URL;
+  const url = new URL(braveBase + BRAVE_SEARCH_PATH);
   url.searchParams.set("q", params.query);
   url.searchParams.set("count", String(params.count));
   if (params.country) {
@@ -786,6 +798,7 @@ export function createWebSearchTool(options?: {
         perplexityModel: resolvePerplexityModel(perplexityConfig),
         grokModel: resolveGrokModel(grokConfig),
         grokInlineCitations: resolveGrokInlineCitations(grokConfig),
+        braveBaseUrl: resolveBraveBaseUrl(search),
       });
       return jsonResult(result);
     },

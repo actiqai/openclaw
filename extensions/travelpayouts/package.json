@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/travelpayouts",
+  "version": "2026.3.8",
+  "private": true,
+  "description": "OpenClaw Travelpayouts travel search plugin (flights, hotels, transfers, trains)",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
