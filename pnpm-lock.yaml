@@ -497,6 +497,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/travelpayouts:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/twitch:
     dependencies:
       '@twurple/api':

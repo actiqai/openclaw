@@ -95,6 +95,7 @@ export const dispatchTelegramMessage = async ({
     ? createTelegramDraftStream({
         api: bot.api,
         chatId,
+        draftId: msg.message_id,
         maxChars: draftMaxChars,
         thread: threadSpec,
         log: logVerbose,

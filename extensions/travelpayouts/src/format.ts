@@ -16,9 +16,11 @@ export function formatPrice(amount: number, currency = "RUB"): string {
 
 /**
  * Build Aviasales deep link for a flight.
+ * API returns link starting with "/search/..." so we just prepend the base URL.
  */
-export function buildFlightLink(token: string): string {
-  return `${AVIASALES_DEEPLINK_BASE}/search/${token}`;
+export function buildFlightLink(link: string): string {
+  if (link.startsWith("http")) return link;
+  return `${AVIASALES_DEEPLINK_BASE}${link}`;
 }
 
 /**

@@ -2,7 +2,7 @@ import type { Bot } from "grammy";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./bot/helpers.js";
 
 const TELEGRAM_STREAM_MAX_CHARS = 4096;
-const DEFAULT_THROTTLE_MS = 1000;
+const DEFAULT_THROTTLE_MS = 500;
 
 export type TelegramDraftStream = {
   update: (text: string) => void;
@@ -15,6 +15,7 @@ export type TelegramDraftStream = {
 export function createTelegramDraftStream(params: {
   api: Bot["api"];
   chatId: number;
+  draftId?: number;
   maxChars?: number;
   thread?: TelegramThreadSpec | null;
   throttleMs?: number;
@@ -28,16 +29,17 @@ export function createTelegramDraftStream(params: {
   const throttleMs = Math.max(250, params.throttleMs ?? DEFAULT_THROTTLE_MS);
   const chatId = params.chatId;
   const threadParams = buildTelegramThreadParams(params.thread);
+  const draftId = params.draftId ?? 1;
 
-  let streamMessageId: number | undefined;
   let lastSentText = "";
   let lastSentAt = 0;
   let pendingText = "";
   let inFlightPromise: Promise<void> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+  let useDraftApi = true;
 
-  const sendOrEditStreamMessage = async (text: string) => {
+  const sendDraft = async (text: string) => {
     if (stopped) {
       return;
     }
@@ -46,8 +48,6 @@ export function createTelegramDraftStream(params: {
       return;
     }
     if (trimmed.length > maxChars) {
-      // Telegram text messages/edits cap at 4096 chars.
-      // Stop streaming once we exceed the cap to avoid repeated API failures.
       stopped = true;
       params.warn?.(
         `telegram stream preview stopped (text length ${trimmed.length} > ${maxChars})`,
@@ -60,23 +60,24 @@ export function createTelegramDraftStream(params: {
     lastSentText = trimmed;
     lastSentAt = Date.now();
     try {
-      if (typeof streamMessageId === "number") {
-        await params.api.editMessageText(chatId, streamMessageId, trimmed);
-        return;
+      if (useDraftApi) {
+        await params.api.sendMessageDraft(chatId, draftId, trimmed, {
+          ...threadParams,
+        });
+      } else {
+        // Fallback: legacy edit-message approach (if sendMessageDraft unavailable).
+        await params.api.editMessageText(chatId, draftId, trimmed);
       }
-      const sent = await params.api.sendMessage(chatId, trimmed, threadParams);
-      const sentMessageId = sent?.message_id;
-      if (typeof sentMessageId !== "number" || !Number.isFinite(sentMessageId)) {
-        stopped = true;
-        params.warn?.("telegram stream preview stopped (missing message id from sendMessage)");
-        return;
-      }
-      streamMessageId = Math.trunc(sentMessageId);
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (useDraftApi && errMsg.includes("unknown method")) {
+        // Bot API too old for sendMessageDraft — fall back to legacy edit mode.
+        useDraftApi = false;
+        params.warn?.("sendMessageDraft not supported, falling back to editMessageText");
+        return;
+      }
       stopped = true;
-      params.warn?.(
-        `telegram stream preview failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      params.warn?.(`telegram stream preview failed: ${errMsg}`);
     }
   };
 
@@ -97,7 +98,7 @@ export function createTelegramDraftStream(params: {
         return;
       }
       pendingText = "";
-      const current = sendOrEditStreamMessage(text).finally(() => {
+      const current = sendDraft(text).finally(() => {
         if (inFlightPromise === current) {
           inFlightPromise = undefined;
         }
@@ -120,18 +121,10 @@ export function createTelegramDraftStream(params: {
     if (inFlightPromise) {
       await inFlightPromise;
     }
-    const messageId = streamMessageId;
-    streamMessageId = undefined;
-    if (typeof messageId !== "number") {
-      return;
-    }
-    try {
-      await params.api.deleteMessage(chatId, messageId);
-    } catch (err) {
-      params.warn?.(
-        `telegram stream preview cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // With sendMessageDraft, the draft disappears automatically when
+    // the final sendMessage is sent. No cleanup needed.
+    // Legacy edit mode also doesn't need cleanup here because the
+    // dispatch layer handles the final message.
   };
 
   const schedule = () => {
@@ -169,12 +162,17 @@ export function createTelegramDraftStream(params: {
     }
   };
 
-  params.log?.(`telegram stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
+  params.log?.(
+    `telegram draft stream ready (maxChars=${maxChars}, throttleMs=${throttleMs}, draftApi=true)`,
+  );
 
   return {
     update,
     flush,
-    messageId: () => streamMessageId,
+    // With sendMessageDraft there is no editable message to track; the draft
+    // is ephemeral. Return undefined so the dispatch layer always sends the
+    // final reply as a fresh sendMessage.
+    messageId: () => undefined,
     clear,
     stop,
   };
