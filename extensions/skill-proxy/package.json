@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/skill-proxy",
+  "version": "2026.4.6",
+  "private": true,
+  "description": "OpenClaw plugin — proxy skill execution to actiq-gateway",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

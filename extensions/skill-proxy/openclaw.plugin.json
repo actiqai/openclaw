@@ -1,0 +1,13 @@
+{
+  "id": "skill-proxy",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "gatewayBaseUrl": {
+        "type": "string",
+        "description": "Base URL of actiq-gateway (e.g. http://10.0.1.40:8082)"
+      }
+    }
+  }
+}
