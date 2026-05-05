@@ -117,6 +117,30 @@ export function buildGatewayCronService(params: {
       });
     },
     runIsolatedAgentJob: async ({ job, message }) => {
+      // Check subscription before running — skip if expired
+      const subCheckUrl = process.env.SUBSCRIPTION_CHECK_URL?.trim();
+      const instanceToken = process.env.INSTANCE_TOKEN?.trim();
+      if (subCheckUrl && instanceToken) {
+        try {
+          const internalToken = process.env.INTERNAL_API_TOKEN?.trim() ?? "";
+          const url = `${subCheckUrl}/api/internal/subscriptions/check?instance_token=${encodeURIComponent(instanceToken)}`;
+          const resp = await fetch(url, {
+            headers: { "X-Internal-Token": internalToken },
+            signal: AbortSignal.timeout(5000),
+          });
+          const data = (await resp.json()) as { active?: boolean };
+          if (!data.active) {
+            cronLogger.info({ jobId: job.id }, "cron: skipping job, subscription not active");
+            return { status: "skipped" as const };
+          }
+        } catch (err) {
+          cronLogger.warn(
+            { err: String(err), jobId: job.id },
+            "cron: subscription check failed, running job anyway",
+          );
+        }
+      }
+
       const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
       return await runCronIsolatedAgentTurn({
         cfg: runtimeConfig,
