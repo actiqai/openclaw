@@ -475,6 +475,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/skill-proxy:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/slack:
     devDependencies:
       openclaw:
