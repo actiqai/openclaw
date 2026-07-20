@@ -12,11 +12,14 @@ const skillProxyPlugin = {
     const gatewayBaseUrl = (
       (api.pluginConfig?.gatewayBaseUrl as string) || DEFAULT_GATEWAY_BASE_URL
     ).replace(/\/+$/, "");
+    const today = new Date().toISOString().slice(0, 10);
 
     api.registerTool({
       label: "Call Platform Skill",
       name: "call_skill",
       description:
+        `Today is ${today}. Resolve relative dates the user gives («на выходных» → the nearest upcoming ` +
+        "Saturday; «завтра», «в июле» …) into a concrete YYYY-MM-DD and pass it as departure_at — never ignore the timeframe. " +
         "Execute a platform skill on the actiq-gateway and return its real results. " +
         "MANDATORY for any travel request — flights, plane tickets, trips, hotels, trains, transfers " +
         "(«билеты», «слетать», «куда поехать», «дёшево»): call this skill INSTEAD of answering from your " +
