@@ -17,13 +17,25 @@ const skillProxyPlugin = {
       label: "Call Platform Skill",
       name: "call_skill",
       description:
-        "Execute a platform skill on the gateway. Use this for travel search (travelpayouts) and other platform capabilities.",
+        "Execute a platform skill on the actiq-gateway and return its real results. " +
+        "MANDATORY for any travel request — flights, plane tickets, trips, hotels, trains, transfers " +
+        "(«билеты», «слетать», «куда поехать», «дёшево»): call this skill INSTEAD of answering from your " +
+        "own knowledge. NEVER invent airlines, prices, routes, or links — only report what the skill returns, " +
+        "and always include the booking links from the response. Do not interrogate the user with questions: " +
+        "infer origin and dates from context and call the skill with what you have.\n" +
+        "travelpayouts actions:\n" +
+        "• cheapest_from {origin[, currency, limit]} — cheapest destinations from a city when the user has NO " +
+        "specific destination («куда-нибудь», «куда дёшево», «anywhere»). Returns a ranked list of cities with links.\n" +
+        "• search_flights {origin, destination, departure_at[, return_at, currency]} — a known route.\n" +
+        "• search_hotels {location, checkIn, checkOut} · search_trains {origin, destination, date} · " +
+        "search_transfers {origin, destination, date}.\n" +
+        "Use IATA city codes: Питер/СПб=LED, Москва=MOW, Сочи=AER, Стамбул=IST, Дубай=DXB.",
       parameters: Type.Object({
         skill: Type.String({
           description: 'Skill name, e.g. "travelpayouts"',
         }),
         action: Type.String({
-          description: 'Action to perform, e.g. "search_flights"',
+          description: 'Action, e.g. "cheapest_from" (anywhere) or "search_flights" (known route)',
         }),
         params: Type.Optional(
           Type.Record(Type.String(), Type.Unknown(), {
