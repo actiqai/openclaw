@@ -24,8 +24,10 @@ const skillProxyPlugin = {
         "and always include the booking links from the response. Do not interrogate the user with questions: " +
         "infer origin and dates from context and call the skill with what you have.\n" +
         "travelpayouts actions:\n" +
-        "• cheapest_from {origin[, currency, limit]} — cheapest destinations from a city when the user has NO " +
-        "specific destination («куда-нибудь», «куда дёшево», «anywhere»). Returns a ranked list of cities with links.\n" +
+        "• cheapest_from {origin[, departure_at, currency, limit]} — cheapest destinations from a city when the " +
+        "user has NO specific destination («куда-нибудь», «куда дёшево», «anywhere»). Returns a ranked list of " +
+        "cities with links. Pass departure_at (YYYY-MM-DD) whenever the user names a time («на выходных», «в июле», " +
+        "«летом») so prices match those dates — omit it only for «когда угодно, лишь бы дёшево».\n" +
         "• search_flights {origin, destination, departure_at[, return_at, currency]} — a known route.\n" +
         "• search_hotels {location, checkIn, checkOut} · search_trains {origin, destination, date} · " +
         "search_transfers {origin, destination, date}.\n" +
