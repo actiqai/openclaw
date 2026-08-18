@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-
 import skillProxyPlugin from "./index.js";
 
 type RegisteredTool = {
   name: string;
-  execute: (toolCallId: string, args: Record<string, unknown>) => Promise<{
+  execute: (
+    toolCallId: string,
+    args: Record<string, unknown>,
+  ) => Promise<{
     content: Array<{ type: string; text: string }>;
   }>;
 };
@@ -72,10 +74,12 @@ describe("skill-proxy — client layer of the webhook→reply flow", () => {
     // --- Request went to the gateway skills endpoint with the right body ---
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${gateway}/v1/skills/travelpayouts`);
+    expect(url).toBe(`${gateway}/v1/skill`);
     expect(init.method).toBe("POST");
 
     const sent = JSON.parse(init.body as string);
+    // Скилл теперь едет в теле, а не в пути — точка входа одна на всю платформу.
+    expect(sent.skill).toBe("travelpayouts");
     expect(sent.action).toBe("search_flights");
     expect(sent.params).toMatchObject({ origin: "LED", destination: "AER" });
 
