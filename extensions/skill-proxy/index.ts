@@ -18,23 +18,14 @@ const skillProxyPlugin = {
       label: "Call Platform Skill",
       name: "call_skill",
       description:
-        `Today is ${today}. Resolve relative dates the user gives («на выходных» → the nearest upcoming ` +
-        "Saturday; «завтра», «в июле» …) into a concrete YYYY-MM-DD and pass it as departure_at — never ignore the timeframe. " +
-        "Execute a platform skill on the actiq-gateway and return its real results. " +
-        "MANDATORY for any travel request — flights, plane tickets, trips, hotels, trains, transfers " +
-        "(«билеты», «слетать», «куда поехать», «дёшево»): call this skill INSTEAD of answering from your " +
-        "own knowledge. NEVER invent airlines, prices, routes, or links — only report what the skill returns, " +
-        "and always include the booking links from the response. Do not interrogate the user with questions: " +
-        "infer origin and dates from context and call the skill with what you have.\n" +
-        "travelpayouts actions:\n" +
-        "• cheapest_from {origin[, departure_at, currency, limit]} — cheapest destinations from a city when the " +
-        "user has NO specific destination («куда-нибудь», «куда дёшево», «anywhere»). Returns a ranked list of " +
-        "cities with links. Pass departure_at (YYYY-MM-DD) whenever the user names a time («на выходных», «в июле», " +
-        "«летом») so prices match those dates — omit it only for «когда угодно, лишь бы дёшево».\n" +
-        "• search_flights {origin, destination, departure_at[, return_at, currency]} — a known route.\n" +
-        "• search_hotels {location, checkIn, checkOut} · search_trains {origin, destination, date} · " +
-        "search_transfers {origin, destination, date}.\n" +
-        "Use IATA city codes: Питер/СПб=LED, Москва=MOW, Сочи=AER, Стамбул=IST, Дубай=DXB.",
+        `Today is ${today}. Resolve relative dates the user gives («на выходных» → the nearest ` +
+        "upcoming Saturday; «завтра», «в июле» …) into a concrete YYYY-MM-DD before calling — " +
+        "never drop the timeframe the user asked for.\n" +
+        "Executes a platform skill on the actiq-gateway and returns its real results. " +
+        "The available skills, their actions and their parameters are described by the skills " +
+        "themselves — follow the instructions of the skill you are using. " +
+        "NEVER invent results: report only what the skill returns, and always include any links " +
+        "from the response. Do not interrogate the user — infer what you can from context and call.",
       parameters: Type.Object({
         skill: Type.String({
           description: 'Skill name, e.g. "travelpayouts"',
@@ -53,14 +44,15 @@ const skillProxyPlugin = {
         const action = args.action as string;
         const params = (args.params as Record<string, unknown>) ?? {};
 
-        const url = `${gatewayBaseUrl}/v1/skills/${encodeURIComponent(skill)}`;
+        // Единая точка входа: адрес один на всю платформу, скилл едет в теле.
+        const url = `${gatewayBaseUrl}/v1/skill`;
 
         let response: Response;
         try {
           response = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ action, params }),
+            body: JSON.stringify({ skill, action, params }),
             signal: AbortSignal.timeout(30_000),
           });
         } catch (err) {
