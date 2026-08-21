@@ -30,6 +30,13 @@ import {
 } from "./together-models.js";
 import { discoverVeniceModels, VENICE_BASE_URL } from "./venice-models.js";
 
+/**
+ * Stand-in for providers identified by their own headers rather than a key. pi's
+ * ModelRegistry requires the field to be non-empty; nothing reads the value and it is
+ * never sent as a credential.
+ */
+const NO_API_KEY_NEEDED = "openclaw-no-api-key-needed";
+
 type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
 export type ProviderConfig = NonNullable<ModelsConfig["providers"]>[string];
 
@@ -376,7 +383,19 @@ export function normalizeProviders(params: {
     // Fill it from the environment or auth profiles when possible.
     const hasModels =
       Array.isArray(normalizedProvider.models) && normalizedProvider.models.length > 0;
-    if (hasModels && !normalizedProvider.apiKey?.trim()) {
+    const carriesOwnHeaders =
+      normalizedProvider.headers !== undefined &&
+      Object.keys(normalizedProvider.headers).length > 0;
+
+    if (hasModels && !normalizedProvider.apiKey?.trim() && carriesOwnHeaders) {
+      // A provider that carries its own headers needs no api key: the key field is not
+      // how it is identified. Only pi's ModelRegistry requires the field to be
+      // non-empty, and that is satisfied here rather than by demanding a key in user
+      // config — otherwise such a provider is unusable, and the only way through is a
+      // placeholder that reads like a credential while proving nothing.
+      mutated = true;
+      normalizedProvider = { ...normalizedProvider, apiKey: NO_API_KEY_NEEDED };
+    } else if (hasModels && !normalizedProvider.apiKey?.trim()) {
       const authMode =
         normalizedProvider.auth ?? (normalizedKey === "amazon-bedrock" ? "aws-sdk" : undefined);
       if (authMode === "aws-sdk") {
