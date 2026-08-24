@@ -1,0 +1,17 @@
+{
+  "id": "skill-state",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "stateDir": {
+        "type": "string",
+        "description": "Where the user's skill data lives (must be inside the backed-up volume)"
+      },
+      "skillsDir": {
+        "type": "string",
+        "description": "Where SKILL.md and schema.json are mounted (e.g. /opt/actiq-skills)"
+      }
+    }
+  }
+}
