@@ -18,6 +18,7 @@ import {
   activeFacts,
   appendHistory,
   ensureRoot,
+  expiredFacts,
   loadFacts,
   loadOverrides,
   loadPending,
@@ -127,7 +128,8 @@ const skillStatePlugin = {
 
     function snapshot(schema: SkillSchema, skill: string): Record<string, unknown> {
       const today = todayISO();
-      const facts = activeFacts(loadFacts(stateDir, skill, today), today);
+      const factStore = loadFacts(stateDir, skill, today);
+      const facts = activeFacts(factStore, today);
       const blocks = sharedBlocks(schema);
 
       // Общие поля подмешиваются в профиль: рост, рассказанный скиллу питания,
@@ -175,6 +177,9 @@ const skillStatePlugin = {
         profile,
         shared: blocks,
         facts,
+        // Истёкшее, что всё ещё имеет значение: визовая история говорит, куда
+        // человек уже ездил и что ему уже давали. Для травмы это мусор, здесь — нет.
+        expired: expiredFacts(factStore, today),
         // Что бот обещал спросить и не спросил. Первое, на что смотреть при любом
         // пробуждении: человек прислал «привет», а за ним висит несданный отчёт
         // за среду — спрашивать надо про среду.
@@ -195,6 +200,9 @@ const skillStatePlugin = {
               params: {
                 profile: callPayload(schema, profile),
                 facts,
+                // Наверх едут и истёкшие документы: паспорт, истёкший вчера, —
+                // худший случай, и гейтвей должен о нём знать.
+                expired: expiredFacts(factStore, today).filter((f) => f.kind === "document"),
                 recent: events,
                 liked,
                 avoid: disliked,

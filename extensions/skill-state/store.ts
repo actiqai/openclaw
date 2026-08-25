@@ -27,7 +27,7 @@ const HISTORY_MAX_DAYS = 90;
 export type Fact = {
   id: string;
   text: string;
-  kind: "injury" | "preference" | "constraint" | "life_event";
+  kind: "injury" | "preference" | "constraint" | "life_event" | "document";
   since: string;
   until?: string | null;
   affects?: string[];
@@ -111,18 +111,24 @@ export function writeShared(root: string, name: string, value: Record<string, un
 }
 
 /** Факты, у которых обязан быть срок: они временны по своей природе. */
-const DATED_KINDS = new Set(["injury", "life_event"]);
+const DATED_KINDS = new Set(["injury", "life_event", "document"]);
 
 export function validateFact(fact: Partial<Fact>): string | null {
   if (!fact.text || fact.text.trim() === "") return "a fact without text says nothing";
 
-  if (!fact.kind || !["injury", "preference", "constraint", "life_event"].includes(fact.kind)) {
-    return "kind must be one of: injury, preference, constraint, life_event";
+  if (
+    !fact.kind ||
+    !["injury", "preference", "constraint", "life_event", "document"].includes(fact.kind)
+  ) {
+    return "kind must be one of: injury, preference, constraint, life_event, document";
   }
 
   if (!fact.since || !/^\d{4}-\d{2}-\d{2}$/.test(fact.since)) return "since must be YYYY-MM-DD";
 
   if (!fact.until) {
+    if (fact.kind === "document") {
+      return "a document needs its expiry date — a passport or visa without one cannot be checked against a trip";
+    }
     if (DATED_KINDS.has(fact.kind)) {
       return `a ${fact.kind} needs an end date — ask how long it lasts instead of making it permanent`;
     }
@@ -541,4 +547,17 @@ export function recentItems(
   }
 
   return [...seen];
+}
+
+/**
+ * Истёкшее, что всё ещё имеет значение.
+ *
+ * Для травмы прошедший срок означает «забудь», для визы — «вот куда человек ездил
+ * и что ему уже давали». Визовая история — самое полезное при следующей заявке,
+ * и стирать её значит обеднять совет ровно там, где он дорог.
+ */
+export function expiredFacts(store: FactStore, today: string): Fact[] {
+  return [...store.archived, ...store.facts.filter((f) => f.until && f.until < today)]
+    .filter((f) => f.until)
+    .sort((a, b) => ((a.until ?? "") > (b.until ?? "") ? -1 : 1));
 }

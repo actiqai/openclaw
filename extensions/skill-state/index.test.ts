@@ -711,3 +711,70 @@ describe("tastes — what to offer again and what never to", () => {
     expect(noScore.status).toBe("error");
   });
 });
+
+describe("documents — the expired ones still matter", () => {
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  it("refuses a passport without an expiry date", async () => {
+    const result = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document" },
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("expiry");
+  });
+
+  // Для травмы прошедший срок означает «забудь», для визы — «вот куда человек ездил
+  // и что ему уже давали». Это самое полезное при следующей заявке.
+  it("keeps expired visas as history instead of forgetting them", async () => {
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "шенген C 2024", kind: "document", since: day(-800), until: day(-400) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "шенген C 2025", kind: "document", since: day(-400), until: day(-30) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document", since: day(-800), until: day(900) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+
+    // Действующий документ — среди активных фактов, истёкшие — в истории.
+    expect(state.facts.map((f: { text: string }) => f.text)).toContain("загранпаспорт РФ");
+    expect(state.expired.map((f: { text: string }) => f.text)).toEqual([
+      "шенген C 2025",
+      "шенген C 2024",
+    ]);
+  });
+
+  // Паспорт, истёкший вчера, — худший из случаев: именно его гейтвей обязан увидеть.
+  it("sends expired documents up so the gateway can warn about them", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document", since: day(-800), until: day(-1) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "старая травма", kind: "injury", since: day(-100), until: day(-50) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    const sentUp = state.call_payload.params.expired.map((f: { text: string }) => f.text);
+
+    expect(sentUp).toContain("загранпаспорт РФ");
+    // Зажившая травма наверх не едет: там она урезала бы план без причины.
+    expect(sentUp).not.toContain("старая травма");
+  });
+});
