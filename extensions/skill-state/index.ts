@@ -21,16 +21,21 @@ import {
   loadFacts,
   loadOverrides,
   loadPending,
+  loadRatings,
   logWeight,
   missedStreak,
   nextFactId,
   overdueDays,
+  preferences,
+  rateItem,
+  recentItems,
   readProfile,
   readShared,
   recentHistory,
   localDate,
   saveFacts,
   saveOverrides,
+  saveRatings,
   savePending,
   todayISO,
   validateFact,
@@ -55,6 +60,18 @@ const RECENT_EVENTS = 5;
  * значит врать статистике, по которой бот потом предлагает снизить нагрузку.
  */
 const MISS_AFTER_DAYS = 2;
+
+/**
+ * Сколько дней предложенное считается свежим.
+ *
+ * Неделя: человек может любить блюдо и всё равно устать от него на четвёртый день,
+ * а «надоело одно и то же» — главная причина, по которой перестают пользоваться
+ * планом питания.
+ */
+const RECENT_DAYS = 7;
+
+/** Сколько событий читается, чтобы собрать недавно предложенное. */
+const HISTORY_WINDOW = 40;
 
 // details — часть контракта тула в pi-agent-core: агент кладёт туда структурный
 // результат рядом с текстом. Нам нечего добавить к JSON, но поле обязательно.
@@ -136,6 +153,12 @@ const skillStatePlugin = {
           )
         : [];
 
+      const ratings = loadRatings(stateDir, skill);
+      const { liked, disliked } = preferences(ratings);
+      const window = recentHistory(stateDir, skill, HISTORY_WINDOW) as Array<
+        Record<string, unknown>
+      >;
+
       const pending = loadPending(stateDir, skill)
         .map((item) => ({ ...item, overdue: overdueDays(item, now) >= 0 }))
         .sort((a, b) => (a.due < b.due ? -1 : 1));
@@ -156,6 +179,10 @@ const skillStatePlugin = {
         // пробуждении: человек прислал «привет», а за ним висит несданный отчёт
         // за среду — спрашивать надо про среду.
         pending,
+        liked,
+        disliked,
+        // Предложенное на этой неделе — чтобы не приходило четвёртый раз подряд.
+        recent_items: recentItems(window, RECENT_DAYS, localToday),
         today: localToday,
         week,
         missed_streak: missedStreak(events),
@@ -169,6 +196,9 @@ const skillStatePlugin = {
                 profile: callPayload(schema, profile),
                 facts,
                 recent: events,
+                liked,
+                avoid: disliked,
+                recent_items: recentItems(window, RECENT_DAYS, localToday),
               },
             }
           : null,
@@ -197,6 +227,7 @@ const skillStatePlugin = {
             Type.Literal("history_append"),
             Type.Literal("expect"),
             Type.Literal("reschedule"),
+            Type.Literal("rate"),
             Type.Literal("due_check"),
             Type.Literal("expect_cancel"),
           ],
@@ -234,6 +265,21 @@ const skillStatePlugin = {
         ),
         reason: Type.Optional(
           Type.String({ description: "op=reschedule: why, in the user's own words" }),
+        ),
+        item: Type.Optional(
+          Type.String({ description: 'op=rate: what is being rated, e.g. "овсянка с бананом"' }),
+        ),
+        score: Type.Optional(
+          Type.Number({
+            description:
+              "op=rate: -2 never again, -1 did not like it, 1 liked it, 2 asks for more. " +
+              "Ratings average over time, so one bad day does not ban a favourite",
+          }),
+        ),
+        tags: Type.Optional(
+          Type.Array(Type.String(), {
+            description: 'op=rate: what it was about, e.g. ["рыба", "долго готовить"]',
+          }),
         ),
         due: Type.Optional(
           Type.String({
@@ -469,6 +515,32 @@ const skillStatePlugin = {
             saveOverrides(stateDir, skill, [...items, item]);
 
             return reply({ ...snapshot(schema, skill), rescheduled: item });
+          }
+
+          case "rate": {
+            const item = (args.item as string) ?? "";
+            if (!item.trim()) {
+              return fail("rate needs `item` — what exactly is being rated");
+            }
+
+            const score = args.score;
+            if (typeof score !== "number") {
+              return fail("rate needs `score` from -2 (never again) to 2 (more of this)");
+            }
+
+            saveRatings(
+              stateDir,
+              skill,
+              rateItem(
+                loadRatings(stateDir, skill),
+                item,
+                score,
+                today,
+                args.tags as string[] | undefined,
+              ),
+            );
+
+            return reply(snapshot(schema, skill));
           }
 
           case "due_check": {

@@ -439,3 +439,106 @@ export function weekAhead(
 
   return out;
 }
+
+/**
+ * Оценка блюда, упражнения — чего угодно, что скилл предлагает повторно.
+ *
+ * Отдельно от профиля, потому что копится само по ходу разговора и не является
+ * ответом ни на какой вопрос анкеты. Отдельно от фактов, потому что не имеет срока
+ * и не запрещает: «не люблю овсянку» — это приоритет, а не запрет.
+ */
+export type Rating = {
+  item: string;
+  score: number;
+  count: number;
+  last: string;
+  tags?: string[];
+};
+
+/** Оценка от -2 (терпеть не может) до 2 (просит ещё). */
+const SCORE_MIN = -2;
+const SCORE_MAX = 2;
+
+export function loadRatings(root: string, skill: string): Rating[] {
+  return readJson<Rating[]>(join(skillDir(root, skill), "ratings.json"), []);
+}
+
+export function saveRatings(root: string, skill: string, items: Rating[]): void {
+  writeJsonAtomic(join(skillDir(root, skill), "ratings.json"), items);
+}
+
+/**
+ * Записывает оценку, усредняя с прошлыми.
+ *
+ * Усреднение, а не замена: человек, которому блюдо понравилось трижды и один раз
+ * не зашло, всё ещё любит это блюдо. Замена по последнему ответу превратила бы
+ * одно «сегодня не хочу» в вечный запрет.
+ */
+export function rateItem(
+  items: Rating[],
+  item: string,
+  score: number,
+  today: string,
+  tags?: string[],
+): Rating[] {
+  const key = item.trim().toLowerCase();
+  const clamped = Math.max(SCORE_MIN, Math.min(SCORE_MAX, score));
+  const existing = items.find((r) => r.item.trim().toLowerCase() === key);
+
+  if (!existing) {
+    return [...items, { item: item.trim(), score: clamped, count: 1, last: today, tags }];
+  }
+
+  const count = existing.count + 1;
+
+  return items.map((r) =>
+    r === existing
+      ? {
+          ...r,
+          score: (r.score * r.count + clamped) / count,
+          count,
+          last: today,
+          tags: tags ? [...new Set([...(r.tags ?? []), ...tags])] : r.tags,
+        }
+      : r,
+  );
+}
+
+/** Что предлагать охотнее и что не предлагать вовсе. */
+export function preferences(items: Rating[]): { liked: string[]; disliked: string[] } {
+  const sorted = [...items].sort((a, b) => b.score - a.score);
+
+  return {
+    liked: sorted.filter((r) => r.score > 0.5).map((r) => r.item),
+    disliked: sorted.filter((r) => r.score < -0.5).map((r) => r.item),
+  };
+}
+
+/**
+ * Что предлагалось за последние дни.
+ *
+ * Нужно, чтобы не повторяться: «надоело одно и то же» — главная причина, по которой
+ * перестают пользоваться планом питания, и никакая оценка блюда её не ловит —
+ * человек может любить это блюдо и всё равно устать от него на четвёртый день.
+ */
+export function recentItems(
+  events: Array<Record<string, unknown>>,
+  days: number,
+  today: string,
+): string[] {
+  const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const seen = new Set<string>();
+
+  for (const event of events) {
+    const date = (event.for_date as string) ?? (event.at as string)?.slice(0, 10) ?? "";
+    if (date < cutoff) continue;
+
+    for (const item of (event.items as string[]) ?? []) {
+      if (typeof item === "string") seen.add(item);
+    }
+  }
+
+  return [...seen];
+}

@@ -627,3 +627,87 @@ describe("everything the bot works with is a date, not a weekday", () => {
     expect(state.call_payload.params.recent.at(-1).for_date).toBe(day(0));
   });
 });
+
+describe("tastes — what to offer again and what never to", () => {
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  beforeEach(async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+  });
+
+  it("remembers what landed well and what did not", async () => {
+    await call({ op: "rate", skill: "workout-plan", item: "овсянка с бананом", score: 2 });
+    await call({ op: "rate", skill: "workout-plan", item: "варёная брокколи", score: -2 });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.liked).toContain("овсянка с бананом");
+    expect(state.disliked).toContain("варёная брокколи");
+  });
+
+  // Один неудачный день не должен хоронить любимое блюдо: человек, которому оно
+  // понравилось трижды, всё ещё его любит.
+  it("averages ratings instead of letting the last word win", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await call({ op: "rate", skill: "workout-plan", item: "паста", score: 2 });
+    }
+    await call({ op: "rate", skill: "workout-plan", item: "паста", score: -1 });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.liked).toContain("паста");
+    expect(state.disliked).not.toContain("паста");
+  });
+
+  it("treats the same dish written differently as one dish", async () => {
+    await call({ op: "rate", skill: "workout-plan", item: "Овсянка", score: 2 });
+    await call({ op: "rate", skill: "workout-plan", item: "овсянка ", score: 2 });
+
+    const { readFileSync } = await import("node:fs");
+    const stored = JSON.parse(
+      readFileSync(join(root, "skills", "workout-plan", "ratings.json"), "utf8"),
+    );
+    expect(stored).toHaveLength(1);
+    expect(stored[0].count).toBe(2);
+  });
+
+  // «Надоело одно и то же» — главная причина, по которой перестают пользоваться
+  // планом питания, и оценкой блюда она не ловится: любимое тоже приедается.
+  it("knows what was already offered this week", async () => {
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["гречка с курицей", "омлет"] },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.recent_items).toEqual(expect.arrayContaining(["гречка с курицей", "омлет"]));
+  });
+
+  it("forgets what was offered long ago", async () => {
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["старое блюдо"], for_date: day(-30) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.recent_items).not.toContain("старое блюдо");
+  });
+
+  it("hands tastes to the gateway with the call", async () => {
+    await call({ op: "rate", skill: "workout-plan", item: "рыба", score: -2 });
+    await call({ op: "history_append", skill: "workout-plan", event: { items: ["омлет"] } });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.call_payload.params.avoid).toContain("рыба");
+    expect(state.call_payload.params.recent_items).toContain("омлет");
+  });
+
+  it("refuses a rating that says nothing", async () => {
+    const noItem = await call({ op: "rate", skill: "workout-plan", score: 2 });
+    expect(noItem.status).toBe("error");
+
+    const noScore = await call({ op: "rate", skill: "workout-plan", item: "суп" });
+    expect(noScore.status).toBe("error");
+  });
+});
