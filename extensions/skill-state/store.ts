@@ -27,7 +27,7 @@ const HISTORY_MAX_DAYS = 90;
 export type Fact = {
   id: string;
   text: string;
-  kind: "injury" | "preference" | "constraint" | "life_event";
+  kind: "injury" | "preference" | "constraint" | "life_event" | "document";
   since: string;
   until?: string | null;
   affects?: string[];
@@ -111,18 +111,24 @@ export function writeShared(root: string, name: string, value: Record<string, un
 }
 
 /** Факты, у которых обязан быть срок: они временны по своей природе. */
-const DATED_KINDS = new Set(["injury", "life_event"]);
+const DATED_KINDS = new Set(["injury", "life_event", "document"]);
 
 export function validateFact(fact: Partial<Fact>): string | null {
   if (!fact.text || fact.text.trim() === "") return "a fact without text says nothing";
 
-  if (!fact.kind || !["injury", "preference", "constraint", "life_event"].includes(fact.kind)) {
-    return "kind must be one of: injury, preference, constraint, life_event";
+  if (
+    !fact.kind ||
+    !["injury", "preference", "constraint", "life_event", "document"].includes(fact.kind)
+  ) {
+    return "kind must be one of: injury, preference, constraint, life_event, document";
   }
 
   if (!fact.since || !/^\d{4}-\d{2}-\d{2}$/.test(fact.since)) return "since must be YYYY-MM-DD";
 
   if (!fact.until) {
+    if (fact.kind === "document") {
+      return "a document needs its expiry date — a passport or visa without one cannot be checked against a trip";
+    }
     if (DATED_KINDS.has(fact.kind)) {
       return `a ${fact.kind} needs an end date — ask how long it lasts instead of making it permanent`;
     }
@@ -541,4 +547,95 @@ export function recentItems(
   }
 
   return [...seen];
+}
+
+/**
+ * Истёкшее, что всё ещё имеет значение.
+ *
+ * Для травмы прошедший срок означает «забудь», для визы — «вот куда человек ездил
+ * и что ему уже давали». Визовая история — самое полезное при следующей заявке,
+ * и стирать её значит обеднять совет ровно там, где он дорог.
+ */
+export function expiredFacts(store: FactStore, today: string): Fact[] {
+  return [...store.archived, ...store.facts.filter((f) => f.until && f.until < today)]
+    .filter((f) => f.until)
+    .sort((a, b) => ((a.until ?? "") > (b.until ?? "") ? -1 : 1));
+}
+
+/**
+ * Ритм повторяющейся услуги: стрижка раз в месяц, маникюр раз в три недели.
+ *
+ * Отдельно от профиля, потому что это не ответ на вопрос анкеты, а наблюдение,
+ * которое уточняется само: человек говорит «пора бы подстричься» — и интервал
+ * известен точнее, чем из любого опроса.
+ */
+export type Cadence = {
+  item: string;
+  every_days: number;
+  note?: string;
+};
+
+export function loadCadence(root: string, skill: string): Cadence[] {
+  return readJson<Cadence[]>(join(skillDir(root, skill), "cadence.json"), []);
+}
+
+export function saveCadence(root: string, skill: string, items: Cadence[]): void {
+  writeJsonAtomic(join(skillDir(root, skill), "cadence.json"), items);
+}
+
+export type DueItem = {
+  item: string;
+  every_days: number;
+  last?: string;
+  days_since?: number;
+  due: boolean;
+};
+
+/**
+ * Когда что делалось в последний раз и что уже пора.
+ *
+ * Последняя дата берётся из истории, а не хранится отдельно: два места для одного
+ * факта означают, что однажды они разойдутся, и бот скажет «пора стричься» тому,
+ * кто вчера от парикмахера.
+ */
+export function dueItems(
+  cadence: Cadence[],
+  events: Array<Record<string, unknown>>,
+  today: string,
+): DueItem[] {
+  const lastSeen = new Map<string, string>();
+
+  for (const event of events) {
+    const date = (event.for_date as string) ?? (event.at as string)?.slice(0, 10) ?? "";
+    if (!date) continue;
+
+    for (const item of (event.items as string[]) ?? []) {
+      if (typeof item !== "string") continue;
+      const key = item.trim().toLowerCase();
+      if (!lastSeen.has(key) || date > (lastSeen.get(key) as string)) lastSeen.set(key, date);
+    }
+  }
+
+  const day = Date.parse(`${today}T00:00:00Z`);
+
+  return cadence
+    .map((c) => {
+      const last = lastSeen.get(c.item.trim().toLowerCase());
+      if (!last) {
+        // Ритм известен, а последнего раза нет: спрашивать «пора?» не о чем,
+        // пока человек не сходил хотя бы однажды.
+        return { item: c.item, every_days: c.every_days, due: false };
+      }
+
+      const daysSince = Math.floor((day - Date.parse(`${last}T00:00:00Z`)) / 86_400_000);
+
+      return {
+        item: c.item,
+        every_days: c.every_days,
+        last,
+        days_since: daysSince,
+        due: daysSince >= c.every_days,
+      };
+    })
+    .sort((a, b) => (b.days_since ?? -1) - (a.days_since ?? -1));
 }

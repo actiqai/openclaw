@@ -711,3 +711,179 @@ describe("tastes — what to offer again and what never to", () => {
     expect(noScore.status).toBe("error");
   });
 });
+
+describe("documents — the expired ones still matter", () => {
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  it("refuses a passport without an expiry date", async () => {
+    const result = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document" },
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("expiry");
+  });
+
+  // Для травмы прошедший срок означает «забудь», для визы — «вот куда человек ездил
+  // и что ему уже давали». Это самое полезное при следующей заявке.
+  it("keeps expired visas as history instead of forgetting them", async () => {
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "шенген C 2024", kind: "document", since: day(-800), until: day(-400) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "шенген C 2025", kind: "document", since: day(-400), until: day(-30) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document", since: day(-800), until: day(900) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+
+    // Действующий документ — среди активных фактов, истёкшие — в истории.
+    expect(state.facts.map((f: { text: string }) => f.text)).toContain("загранпаспорт РФ");
+    expect(state.expired.map((f: { text: string }) => f.text)).toEqual([
+      "шенген C 2025",
+      "шенген C 2024",
+    ]);
+  });
+
+  // Паспорт, истёкший вчера, — худший из случаев: именно его гейтвей обязан увидеть.
+  it("sends expired documents up so the gateway can warn about them", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "загранпаспорт РФ", kind: "document", since: day(-800), until: day(-1) },
+    });
+    await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "старая травма", kind: "injury", since: day(-100), until: day(-50) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    const sentUp = state.call_payload.params.expired.map((f: { text: string }) => f.text);
+
+    expect(sentUp).toContain("загранпаспорт РФ");
+    // Зажившая травма наверх не едет: там она урезала бы план без причины.
+    expect(sentUp).not.toContain("старая травма");
+  });
+});
+
+describe("cadence — the thing no salon does for you", () => {
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  it("knows when it is time again, and when it is not", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 28 });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["стрижка"], for_date: day(-30) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    const haircut = state.due_items.find((d: { item: string }) => d.item === "стрижка");
+
+    expect(haircut.days_since).toBe(30);
+    expect(haircut.due).toBe(true);
+  });
+
+  it("stays quiet while the rhythm still holds", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 28 });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["стрижка"], for_date: day(-3) },
+    });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(false);
+  });
+
+  // Ритм известен, а последнего раза нет: спрашивать «пора?» не о чем, пока человек
+  // не сходил хотя бы однажды.
+  it("does not nag about something that never happened", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "маникюр", every_days: 21 });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(false);
+  });
+
+  it("raises it in the silent check once it is overdue", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 28 });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["стрижка"], for_date: day(-40) },
+    });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(true);
+    expect(check.due_items[0].item).toBe("стрижка");
+  });
+
+  // Две записи одного ритма означали бы, что однажды они разойдутся, и бот скажет
+  // «пора стричься» тому, кто вчера от парикмахера.
+  it("keeps one rhythm per service, not a pile of them", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 28 });
+    await call({ op: "cadence_set", skill: "workout-plan", item: "Стрижка", every_days: 35 });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    const matching = state.due_items.filter(
+      (d: { item: string }) => d.item.toLowerCase() === "стрижка",
+    );
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0].every_days).toBe(35);
+  });
+
+  it("takes the latest visit, not the first one", async () => {
+    await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 28 });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["стрижка"], for_date: day(-60) },
+    });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { items: ["стрижка"], for_date: day(-5) },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.due_items[0].days_since).toBe(5);
+    expect(state.due_items[0].due).toBe(false);
+  });
+
+  // Проверяем именно отказ по причине, а не просто «status: error»: неизвестная
+  // операция тоже вернула бы ошибку, и такой тест зеленел бы при полностью
+  // отсутствующей реализации.
+  it("refuses a rhythm that says nothing", async () => {
+    const noItem = await call({ op: "cadence_set", skill: "workout-plan", every_days: 28 });
+    expect(noItem.message).toContain("`item`");
+
+    const noDays = await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка" });
+    expect(noDays.message).toContain("every_days");
+
+    expect((await call({ op: "cadence_set", skill: "workout-plan", every_days: 28 })).status).toBe(
+      "error",
+    );
+    expect((await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка" })).status).toBe(
+      "error",
+    );
+    expect(
+      (await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 0 }))
+        .status,
+    ).toBe("error");
+  });
+});
