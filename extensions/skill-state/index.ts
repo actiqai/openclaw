@@ -6,8 +6,10 @@ import {
   callPayload,
   mergeProfile,
   readyToCall,
+  splitPatch,
   stageOf,
   validateKnownFields,
+  withShared,
   type FieldError,
   type Profile,
   type SkillSchema,
@@ -17,16 +19,22 @@ import {
   appendHistory,
   ensureRoot,
   loadFacts,
+  loadPending,
+  logWeight,
+  missedStreak,
   nextFactId,
+  overdueDays,
   readProfile,
   readShared,
   recentHistory,
   saveFacts,
+  savePending,
   todayISO,
   validateFact,
   writeProfile,
   writeShared,
   type Fact,
+  type Pending,
 } from "./store.js";
 
 const DEFAULT_STATE_DIR = "/home/openclaw/.openclaw/actiq";
@@ -34,6 +42,14 @@ const DEFAULT_SKILLS_DIR = "/opt/actiq-skills";
 
 /** Сколько последних событий уезжает в гейтвей вместе с вызовом. */
 const RECENT_EVENTS = 5;
+
+/**
+ * Через сколько дней просрочки ожидание считается несданным отчётом.
+ *
+ * Не ноль: человек может ответить утром следующего дня, и записывать это пропуском
+ * значит врать статистике, по которой бот потом предлагает снизить нагрузку.
+ */
+const MISS_AFTER_DAYS = 2;
 
 // details — часть контракта тула в pi-agent-core: агент кладёт туда структурный
 // результат рядом с текстом. Нам нечего добавить к JSON, но поле обязательно.
@@ -78,16 +94,28 @@ const skillStatePlugin = {
 
     function snapshot(schema: SkillSchema, skill: string): Record<string, unknown> {
       const today = todayISO();
-      const profile = readProfile(stateDir, skill);
       const facts = activeFacts(loadFacts(stateDir, skill, today), today);
-      const shared: Record<string, unknown> = {};
 
+      const blocks: Record<string, Record<string, unknown>> = {};
       for (const name of schema.shared ?? []) {
-        shared[name] = readShared(stateDir, name);
+        blocks[name] = readShared(stateDir, name);
       }
+
+      // Общие поля подмешиваются в профиль: рост, рассказанный скиллу питания,
+      // обязан считаться известным и тренировкам, иначе человек рассказывает
+      // о себе дважды и делает вывод, что его не слушают.
+      const profile = withShared(schema, readProfile(stateDir, skill), blocks);
 
       const { stage, missing, next_question } = stageOf(schema, profile);
       const ready = readyToCall(schema, profile);
+
+      const now = new Date();
+      const pending = loadPending(stateDir, skill)
+        .map((item) => ({ ...item, overdue: overdueDays(item, now) >= 0 }))
+        .sort((a, b) => (a.due < b.due ? -1 : 1));
+      const events = recentHistory(stateDir, skill, RECENT_EVENTS) as Array<
+        Record<string, unknown>
+      >;
 
       return {
         status: "ok",
@@ -96,8 +124,13 @@ const skillStatePlugin = {
         next_question,
         missing,
         profile,
-        shared,
+        shared: blocks,
         facts,
+        // Что бот обещал спросить и не спросил. Первое, на что смотреть при любом
+        // пробуждении: человек прислал «привет», а за ним висит несданный отчёт
+        // за среду — спрашивать надо про среду.
+        pending,
+        missed_streak: missedStreak(events),
         ready,
         // Запрос собирает код, а не модель: иначе «строгая структура» держится
         // на том, что модель ничего не забыла и не дописала лишнего.
@@ -107,7 +140,7 @@ const skillStatePlugin = {
               params: {
                 profile: callPayload(schema, profile),
                 facts,
-                recent: recentHistory(stateDir, skill, RECENT_EVENTS),
+                recent: events,
               },
             }
           : null,
@@ -134,6 +167,9 @@ const skillStatePlugin = {
             Type.Literal("fact_add"),
             Type.Literal("fact_close"),
             Type.Literal("history_append"),
+            Type.Literal("expect"),
+            Type.Literal("due_check"),
+            Type.Literal("expect_cancel"),
           ],
           { description: "What to do with the skill's stored state" },
         ),
@@ -142,11 +178,6 @@ const skillStatePlugin = {
           Type.Record(Type.String(), Type.Unknown(), {
             description:
               "op=patch: profile fields to store. Lists are replaced whole, not appended",
-          }),
-        ),
-        shared: Type.Optional(
-          Type.Record(Type.String(), Type.Unknown(), {
-            description: 'op=patch: shared blocks to store, e.g. {"body": {"height_cm": 180}}',
           }),
         ),
         fact: Type.Optional(
@@ -158,6 +189,25 @@ const skillStatePlugin = {
         ),
         fact_id: Type.Optional(
           Type.String({ description: "op=fact_close: which fact ended early" }),
+        ),
+        due: Type.Optional(
+          Type.String({
+            description: "op=expect: ISO timestamp by which the user is expected to answer",
+          }),
+        ),
+        kind: Type.Optional(
+          Type.String({ description: 'op=expect: what is expected, default "report"' }),
+        ),
+        about: Type.Optional(
+          Type.String({ description: "op=expect: what it refers to, e.g. the workout date" }),
+        ),
+        closes: Type.Optional(
+          Type.String({ description: "op=history_append: which pending item this answers" }),
+        ),
+        pending_id: Type.Optional(
+          Type.String({
+            description: "op=expect_cancel: which expectation to drop; omit to drop all",
+          }),
         ),
         event: Type.Optional(
           Type.Record(Type.String(), Type.Unknown(), {
@@ -194,16 +244,17 @@ const skillStatePlugin = {
               return fail("some fields do not match the skill schema", errors);
             }
 
-            writeProfile(stateDir, skill, mergeProfile(readProfile(stateDir, skill), patch));
+            // Поле само знает, где живёт: рост уезжает в общий блок, цель —
+            // в профиль скилла. Модели про это различие знать не нужно, а значит
+            // и ошибиться в нём она не может.
+            const { own, shared } = splitPatch(schema, patch);
 
-            for (const [name, value] of Object.entries((args.shared as Profile) ?? {})) {
-              if (!(schema.shared ?? []).includes(name)) {
-                return fail(`this skill does not use the shared block "${name}"`);
-              }
-              writeShared(stateDir, name, {
-                ...readShared(stateDir, name),
-                ...(value as Record<string, unknown>),
-              });
+            if (Object.keys(own).length > 0) {
+              writeProfile(stateDir, skill, mergeProfile(readProfile(stateDir, skill), own));
+            }
+
+            for (const [name, value] of Object.entries(shared)) {
+              writeShared(stateDir, name, { ...readShared(stateDir, name), ...value });
             }
 
             return reply(snapshot(schema, skill));
@@ -250,8 +301,115 @@ const skillStatePlugin = {
             return reply({ ...snapshot(schema, skill), closed: id });
           }
 
+          case "expect": {
+            const due = (args.due as string) ?? "";
+            if (!due || Number.isNaN(Date.parse(due))) {
+              return fail("expect needs `due` as an ISO timestamp — when the answer is expected");
+            }
+
+            const items = loadPending(stateDir, skill);
+            const kind = (args.kind as string) || "report";
+
+            // Просроченное ожидание того же рода, на которое так и не ответили,
+            // закрывается пропуском. Иначе висящие обещания копятся, и бот будет
+            // спрашивать про тренировку двухнедельной давности вместо вчерашней.
+            const now = new Date();
+            const stale = items.filter(
+              (i) => i.kind === kind && overdueDays(i, now) >= MISS_AFTER_DAYS,
+            );
+            for (const item of stale) {
+              appendHistory(stateDir, skill, {
+                missed: true,
+                about: item.about,
+                expected: item.due,
+              });
+            }
+
+            const kept = items.filter((i) => !stale.includes(i));
+            const item: Pending = {
+              id: `p${Date.now()}`,
+              kind,
+              about: (args.about as string) || undefined,
+              due,
+              created: now.toISOString(),
+            };
+
+            savePending(stateDir, skill, [...kept, item]);
+
+            return reply({ ...snapshot(schema, skill), expecting: item });
+          }
+
           case "history_append": {
-            appendHistory(stateDir, skill, (args.event as Record<string, unknown>) ?? {});
+            const event = (args.event as Record<string, unknown>) ?? {};
+
+            appendHistory(stateDir, skill, event);
+
+            // Отчёт закрывает ожидание: без этого бот, которому только что всё
+            // рассказали, через час спросит то же самое ещё раз.
+            const items = loadPending(stateDir, skill);
+            const closeId = (args.closes as string) || items.find((i) => i.kind === "report")?.id;
+            if (closeId) {
+              savePending(
+                stateDir,
+                skill,
+                items.filter((i) => i.id !== closeId),
+              );
+            }
+
+            // Вес из отчёта — это общий факт о теле, а не запись в дневнике
+            // тренировок: питание считает по нему калории.
+            if (typeof event.weight_kg === "number") {
+              writeShared(
+                stateDir,
+                "body",
+                logWeight(readShared(stateDir, "body"), event.weight_kg, today),
+              );
+            }
+
+            return reply({ ...snapshot(schema, skill), closed: closeId ?? null });
+          }
+
+          case "due_check": {
+            // Отдельная операция, а не «посмотри в pending и реши сам»: этот вызов
+            // приходит из молчаливой крон-задачи, и цена ошибки несимметрична.
+            // Промолчать, когда стоило спросить, — упущенный отчёт; написать, когда
+            // человек уже всё рассказал, — бот, который не слушает. Второе люди
+            // прощают гораздо хуже, поэтому решение принимает код, а не модель.
+            const now = new Date();
+            const due = loadPending(stateDir, skill)
+              .filter((item) => overdueDays(item, now) >= 0)
+              .sort((a, b) => (a.due < b.due ? -1 : 1));
+
+            if (due.length === 0) {
+              return reply({
+                status: "ok",
+                skill,
+                ask: false,
+                reason: "nothing is owed right now",
+              });
+            }
+
+            const events = recentHistory(stateDir, skill, RECENT_EVENTS) as Array<
+              Record<string, unknown>
+            >;
+
+            return reply({
+              status: "ok",
+              skill,
+              ask: true,
+              pending: due[0],
+              // Три пропуска подряд — это разговор не про сегодняшнюю тренировку,
+              // а про то, что план не подошёл. Спрашивать «как прошло?» четвёртый
+              // раз бессмысленно и назойливо.
+              missed_streak: missedStreak(events),
+            });
+          }
+
+          case "expect_cancel": {
+            const items = loadPending(stateDir, skill);
+            const id = args.pending_id as string;
+
+            savePending(stateDir, skill, id ? items.filter((i) => i.id !== id) : []);
 
             return reply(snapshot(schema, skill));
           }

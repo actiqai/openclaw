@@ -11,6 +11,13 @@ export type FieldType = "string" | "int" | "number" | "bool" | "enum" | "string[
 
 export type Field = {
   type: FieldType;
+  /**
+   * Общий блок, в котором поле живёт на диске («body» — рост, вес, возраст).
+   * Пометка стоит на поле, а не отдельным списком: иначе общие данные — второй
+   * сорт, их не проверяет схема и не видит вычисление стадии, и каждый скилл
+   * спрашивает их заново.
+   */
+  shared?: string;
   values?: string[];
   min?: number;
   max?: number;
@@ -189,4 +196,58 @@ export function mergeProfile(profile: Profile, patch: Profile): Profile {
   }
 
   return merged;
+}
+
+/** Поля, которые живут в общем блоке, а не в профиле скилла. */
+export function sharedFields(schema: SkillSchema): Record<string, string> {
+  const map: Record<string, string> = {};
+
+  for (const [name, field] of Object.entries(schema.fields)) {
+    if (field.shared) map[name] = field.shared;
+  }
+
+  return map;
+}
+
+/**
+ * Полный вид профиля: собственные поля скилла плюс общие.
+ *
+ * Стадия и вызов считаются по нему, поэтому рост, рассказанный скиллу питания,
+ * автоматически считается известным и тренировкам — переспрашивать нечего.
+ */
+export function withShared(
+  schema: SkillSchema,
+  profile: Profile,
+  blocks: Record<string, Record<string, unknown>>,
+): Profile {
+  const merged: Profile = { ...profile };
+
+  for (const [name, block] of Object.entries(sharedFields(schema))) {
+    const value = blocks[block]?.[name];
+    if (value !== undefined) merged[name] = value;
+  }
+
+  return merged;
+}
+
+/** Делит патч на собственные поля скилла и общие, по блокам. */
+export function splitPatch(
+  schema: SkillSchema,
+  patch: Profile,
+): { own: Profile; shared: Record<string, Profile> } {
+  const map = sharedFields(schema);
+  const own: Profile = {};
+  const shared: Record<string, Profile> = {};
+
+  for (const [name, value] of Object.entries(patch)) {
+    const block = map[name];
+    if (!block) {
+      own[name] = value;
+      continue;
+    }
+    shared[block] ??= {};
+    shared[block][name] = value;
+  }
+
+  return { own, shared };
 }

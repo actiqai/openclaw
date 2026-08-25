@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -41,6 +41,14 @@ const SCHEMA = {
       question: "Занимался раньше?",
     },
     equipment: { type: "string[]", stage: "details", question: "Что есть из инвентаря?" },
+    height_cm: {
+      type: "int",
+      min: 100,
+      max: 250,
+      stage: "details",
+      shared: "body",
+      question: "Какой рост?",
+    },
   },
   call: {
     action: "generate",
@@ -161,19 +169,27 @@ describe("writing the profile", () => {
     expect(state.profile.equipment).toEqual(["турник"]);
   });
 
-  it("stores shared body data where every skill can find it", async () => {
-    await call({
-      op: "patch",
-      skill: "workout-plan",
-      patch: {},
-      shared: { body: { height_cm: 180 } },
-    });
+  // Рост, рассказанный одному скиллу, обязан быть известен другому: человек,
+  // рассказывающий о себе дважды, делает вывод, что его не слушают.
+  it("files shared facts about the body where every skill can find them", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { height_cm: 180 } });
 
     const state = await call({ op: "get", skill: "workout-plan" });
     expect(state.shared.body.height_cm).toBe(180);
+    expect(state.profile.height_cm).toBe(180);
 
     const onDisk = JSON.parse(readFileSync(join(root, "shared", "body.json"), "utf8"));
     expect(onDisk.height_cm).toBe(180);
+
+    // В профиль скилла общее поле не дублируется: две копии роста однажды разойдутся.
+    expect(existsSync(join(root, "skills", "workout-plan", "profile.json"))).toBe(false);
+  });
+
+  it("validates a shared field like any other", async () => {
+    const result = await call({ op: "patch", skill: "workout-plan", patch: { height_cm: 3 } });
+
+    expect(result.status).toBe("error");
+    expect(result.errors[0]).toMatchObject({ field: "height_cm", reason: "range" });
   });
 });
 
@@ -270,17 +286,13 @@ describe("the call to the gateway", () => {
   // наверх уходит только то, что перечислено в схеме.
   it("sends only the fields the schema includes", async () => {
     await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
-    await call({
-      op: "patch",
-      skill: "workout-plan",
-      patch: {},
-      shared: { body: { weight_kg: 90 } },
-    });
+    await call({ op: "patch", skill: "workout-plan", patch: { height_cm: 180 } });
 
     const state = await call({ op: "get", skill: "workout-plan" });
 
     expect(Object.keys(state.call_payload.params.profile).sort()).toEqual(["goal", "minutes"]);
-    expect(JSON.stringify(state.call_payload)).not.toContain("weight_kg");
+    // Рост известен скиллу, но в гейтвей не едет: включение перечисляет схема.
+    expect(JSON.stringify(state.call_payload)).not.toContain("height_cm");
   });
 
   it("offers no payload until the required fields are collected", async () => {
@@ -328,5 +340,133 @@ describe("failure modes", () => {
       f.includes("corrupt"),
     );
     expect(saved).toHaveLength(1);
+  });
+});
+
+describe("check-ins — the bot chases the report, silently", () => {
+  const past = () => new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const future = () => new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+
+  // Главное свойство: крон-задача молчалива. Написать человеку, который уже всё
+  // рассказал, — это бот, который не слушает; такое прощают хуже, чем пропущенный
+  // вопрос.
+  it("says nothing when the report is already in", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+    await call({ op: "history_append", skill: "workout-plan", event: { done: true, hard: "ok" } });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(false);
+  });
+
+  it("says nothing before the report is due", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: future(), about: "2026-08-24" });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(false);
+  });
+
+  it("asks once the report is overdue, and says what it is about", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(true);
+    expect(check.pending.about).toBe("2026-08-24");
+  });
+
+  // Ожидание живёт на диске: между отправкой плана и вопросом проходят часы,
+  // за которые контейнер успевает перезапуститься, а сессия — закончиться.
+  it("remembers what it owes across a restart", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+
+    const tools: RegisteredTool[] = [];
+    skillStatePlugin.register({
+      pluginConfig: { stateDir: root, skillsDir },
+      registerTool: (t: RegisteredTool) => tools.push(t),
+      logger: { info: () => {} },
+    } as never);
+
+    const fresh = tools.find((t) => t.name === "skill_state")!;
+    const check = JSON.parse(
+      (await fresh.execute("t", { op: "due_check", skill: "workout-plan" })).content[0].text,
+    );
+
+    expect(check.ask).toBe(true);
+  });
+
+  it("counts a long-unanswered report as a miss when the next one is scheduled", async () => {
+    const longAgo = new Date(Date.now() - 5 * 86_400_000).toISOString();
+
+    await call({ op: "expect", skill: "workout-plan", due: longAgo, about: "давняя" });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: "сегодняшняя" });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+
+    // Спрашиваем про сегодняшнюю, а не про пятидневной давности.
+    expect(check.pending.about).toBe("сегодняшняя");
+    expect(check.missed_streak).toBe(1);
+  });
+
+  it("stops nagging after three misses in a row", async () => {
+    for (const day of [5, 4, 3]) {
+      await call({
+        op: "expect",
+        skill: "workout-plan",
+        due: new Date(Date.now() - day * 86_400_000).toISOString(),
+      });
+    }
+    await call({ op: "expect", skill: "workout-plan", due: past() });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.missed_streak).toBe(3);
+  });
+
+  // Вес из отчёта — общий факт о теле: питание считает по нему калории, и второй
+  // раз спрашивать его нельзя.
+  it("files a weight mentioned in the report into the shared block", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: past() });
+    await call({
+      op: "history_append",
+      skill: "workout-plan",
+      event: { done: true, hard: "ok", weight_kg: 88.5 },
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.shared.body.weight_kg).toBe(88.5);
+    expect(state.shared.body.weight_log).toHaveLength(1);
+  });
+
+  it("keeps weight as a series, because progress is a sequence and not a number", async () => {
+    await call({ op: "history_append", skill: "workout-plan", event: { weight_kg: 90 } });
+    await call({ op: "history_append", skill: "workout-plan", event: { weight_kg: 89 } });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    // Два взвешивания в один день — правка, а не динамика.
+    expect(state.shared.body.weight_log).toHaveLength(1);
+    expect(state.shared.body.weight_kg).toBe(89);
+  });
+
+  it("drops what it owes when the user asks to be left alone", async () => {
+    await call({ op: "expect", skill: "workout-plan", due: past() });
+    await call({ op: "expect_cancel", skill: "workout-plan" });
+
+    const check = await call({ op: "due_check", skill: "workout-plan" });
+    expect(check.ask).toBe(false);
+  });
+});
+
+// Отдельно от сценариев: события, записанные в одну миллисекунду, не должны
+// затирать друг друга. Потеря здесь тихая — пропадает ровно то, что человек
+// только что рассказал.
+describe("history", () => {
+  it("keeps every event even when they land in the same millisecond", async () => {
+    await Promise.all([
+      call({ op: "history_append", skill: "workout-plan", event: { note: "a" } }),
+      call({ op: "history_append", skill: "workout-plan", event: { note: "b" } }),
+      call({ op: "history_append", skill: "workout-plan", event: { note: "c" } }),
+    ]);
+
+    const { readdirSync } = await import("node:fs");
+    const files = readdirSync(join(root, "skills", "workout-plan", "history"));
+    expect(files).toHaveLength(3);
   });
 });

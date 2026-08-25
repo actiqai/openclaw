@@ -195,8 +195,15 @@ export function appendHistory(
   const dir = join(skillDir(root, skill), "history");
   mkdirSync(dir, { recursive: true });
 
+  // Имя с точностью до миллисекунды всё равно совпадает, когда события пишутся
+  // подряд — например, когда три просроченных ожидания разом закрываются пропусками.
+  // Совпадение имени означает молча потерянную запись, поэтому занятое имя
+  // разводится суффиксом, а не перезаписывается.
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  const path = join(dir, `${stamp}.json`);
+  let path = join(dir, `${stamp}.json`);
+  for (let n = 1; existsSync(path); n += 1) {
+    path = join(dir, `${stamp}-${n}.json`);
+  }
 
   writeJsonAtomic(path, { at: now.toISOString(), ...(event as Record<string, unknown>) });
   pruneHistory(dir, now);
@@ -236,4 +243,84 @@ export function recentHistory(root: string, skill: string, limit: number): unkno
     .slice(-limit)
     .map((f) => readJson<unknown>(join(dir, f), null))
     .filter((e) => e !== null);
+}
+
+/**
+ * Ожидание отчёта: бот прислал тренировку и ждёт, что человек скажет, как прошло.
+ *
+ * Ожидание живёт на диске, а не в памяти диалога: между отправкой плана и вопросом
+ * «как прошло» проходят часы, за которые контейнер успевает перезапуститься, а
+ * сессия — закончиться. Обещание спросить, живущее только в контексте модели, — это
+ * обещание, которое не будет выполнено.
+ */
+export type Pending = {
+  id: string;
+  kind: string;
+  about?: string;
+  due: string;
+  created: string;
+};
+
+export function loadPending(root: string, skill: string): Pending[] {
+  return readJson<Pending[]>(join(skillDir(root, skill), "pending.json"), []);
+}
+
+export function savePending(root: string, skill: string, items: Pending[]): void {
+  writeJsonAtomic(join(skillDir(root, skill), "pending.json"), items);
+}
+
+/**
+ * Насколько давно ожидание просрочено, в днях.
+ *
+ * Отдельная функция, потому что «просрочено» решает, спрашивать ли, а «просрочено
+ * давно» — считать ли это пропуском.
+ */
+export function overdueDays(item: Pending, now: Date): number {
+  return (now.getTime() - Date.parse(item.due)) / 86_400_000;
+}
+
+/**
+ * Сколько отчётов подряд человек не сдал.
+ *
+ * Считается по истории, а не хранится счётчиком: счётчик, который забыли обнулить,
+ * заставит бота приставать к человеку, который на самом деле занимается.
+ */
+export function missedStreak(events: Array<Record<string, unknown>>): number {
+  let streak = 0;
+
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    const missed = event.missed === true || event.done === false;
+    if (!missed) break;
+    streak += 1;
+  }
+
+  return streak;
+}
+
+/**
+ * Пишет вес в общий блок и ведёт его историю.
+ *
+ * Одно число «текущий вес» отвечает на вопрос «сколько сейчас», но не на вопрос
+ * «идёт ли дело» — а именно второй заставляет человека остаться. Лог дописывается,
+ * а не перезаписывается: динамика есть только у последовательности.
+ */
+export function logWeight(
+  body: Record<string, unknown>,
+  kg: number,
+  today: string,
+): Record<string, unknown> {
+  const log = Array.isArray(body.weight_log)
+    ? [...(body.weight_log as Array<Record<string, unknown>>)]
+    : [];
+  const last = log[log.length - 1];
+
+  // Два взвешивания за день — это правка, а не динамика.
+  if (last && last.date === today) {
+    log[log.length - 1] = { date: today, kg };
+  } else {
+    log.push({ date: today, kg });
+  }
+
+  return { ...body, weight_kg: kg, weight_log: log };
 }
