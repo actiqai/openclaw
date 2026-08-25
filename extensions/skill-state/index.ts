@@ -244,7 +244,11 @@ const skillStatePlugin = {
           Type.String({ description: 'op=expect: what is expected, default "report"' }),
         ),
         about: Type.Optional(
-          Type.String({ description: "op=expect: what it refers to, e.g. the workout date" }),
+          Type.String({
+            description:
+              "op=expect: the date of the session this report is about, YYYY-MM-DD. " +
+              "Take it from `week` — never «среда», always the concrete date",
+          }),
         ),
         closes: Type.Optional(
           Type.String({ description: "op=history_append: which pending item this answers" }),
@@ -352,8 +356,16 @@ const skillStatePlugin = {
               return fail("expect needs `due` as an ISO timestamp — when the answer is expected");
             }
 
-            const items = loadPending(stateDir, skill);
             const kind = (args.kind as string) || "report";
+
+            const about = (args.about as string) || "";
+            if (kind === "report" && !/^\d{4}-\d{2}-\d{2}$/.test(about)) {
+              // Ожидание без даты занятия делает отчёт неприкреплённым: «как прошло»
+              // без «что именно» некуда записать и нечем потом объяснить.
+              return fail("expect needs `about` as the session date, YYYY-MM-DD");
+            }
+
+            const items = loadPending(stateDir, skill);
 
             // Просроченное ожидание того же рода, на которое так и не ответили,
             // закрывается пропуском. Иначе висящие обещания копятся, и бот будет
@@ -374,7 +386,7 @@ const skillStatePlugin = {
             const item: Pending = {
               id: `p${Date.now()}`,
               kind,
-              about: (args.about as string) || undefined,
+              about: about || undefined,
               due,
               created: now.toISOString(),
             };
@@ -387,12 +399,23 @@ const skillStatePlugin = {
           case "history_append": {
             const event = (args.event as Record<string, unknown>) ?? {};
 
-            appendHistory(stateDir, skill, event);
+            const items = loadPending(stateDir, skill);
+            const closing = args.closes
+              ? items.find((i) => i.id === args.closes)
+              : items.find((i) => i.kind === "report");
+
+            // Событие помечается днём занятия, а не моментом сообщения. Человек
+            // отвечает утром следующего дня — и отчёт лёг бы к несуществующей
+            // тренировке, а вчерашняя осталась бы пропущенной.
+            const forDate =
+              (event.for_date as string) ??
+              (closing?.about && /^\d{4}-\d{2}-\d{2}$/.test(closing.about) ? closing.about : today);
+
+            appendHistory(stateDir, skill, { ...event, for_date: forDate });
 
             // Отчёт закрывает ожидание: без этого бот, которому только что всё
             // рассказали, через час спросит то же самое ещё раз.
-            const items = loadPending(stateDir, skill);
-            const closeId = (args.closes as string) || items.find((i) => i.kind === "report")?.id;
+            const closeId = closing?.id;
             if (closeId) {
               savePending(
                 stateDir,

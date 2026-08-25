@@ -347,6 +347,9 @@ describe("failure modes", () => {
 });
 
 describe("check-ins — the bot chases the report, silently", () => {
+  /** Дата занятия: отчёт привязывается к дню, а не к моменту сообщения. */
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
   const past = () => new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   const future = () => new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
 
@@ -354,7 +357,7 @@ describe("check-ins — the bot chases the report, silently", () => {
   // рассказал, — это бот, который не слушает; такое прощают хуже, чем пропущенный
   // вопрос.
   it("says nothing when the report is already in", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
     await call({ op: "history_append", skill: "workout-plan", event: { done: true, hard: "ok" } });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
@@ -362,24 +365,24 @@ describe("check-ins — the bot chases the report, silently", () => {
   });
 
   it("says nothing before the report is due", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: future(), about: "2026-08-24" });
+    await call({ op: "expect", skill: "workout-plan", due: future(), about: day(0) });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
     expect(check.ask).toBe(false);
   });
 
   it("asks once the report is overdue, and says what it is about", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
     expect(check.ask).toBe(true);
-    expect(check.pending.about).toBe("2026-08-24");
+    expect(check.pending.about).toBe(day(0));
   });
 
   // Ожидание живёт на диске: между отправкой плана и вопросом проходят часы,
   // за которые контейнер успевает перезапуститься, а сессия — закончиться.
   it("remembers what it owes across a restart", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: past(), about: "2026-08-24" });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
 
     const tools: RegisteredTool[] = [];
     skillStatePlugin.register({
@@ -399,25 +402,26 @@ describe("check-ins — the bot chases the report, silently", () => {
   it("counts a long-unanswered report as a miss when the next one is scheduled", async () => {
     const longAgo = new Date(Date.now() - 5 * 86_400_000).toISOString();
 
-    await call({ op: "expect", skill: "workout-plan", due: longAgo, about: "давняя" });
-    await call({ op: "expect", skill: "workout-plan", due: past(), about: "сегодняшняя" });
+    await call({ op: "expect", skill: "workout-plan", due: longAgo, about: day(-5) });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
 
     // Спрашиваем про сегодняшнюю, а не про пятидневной давности.
-    expect(check.pending.about).toBe("сегодняшняя");
+    expect(check.pending.about).toBe(day(0));
     expect(check.missed_streak).toBe(1);
   });
 
   it("stops nagging after three misses in a row", async () => {
-    for (const day of [5, 4, 3]) {
+    for (const offset of [5, 4, 3]) {
       await call({
         op: "expect",
         skill: "workout-plan",
-        due: new Date(Date.now() - day * 86_400_000).toISOString(),
+        due: new Date(Date.now() - offset * 86_400_000).toISOString(),
+        about: day(-offset),
       });
     }
-    await call({ op: "expect", skill: "workout-plan", due: past() });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
     expect(check.missed_streak).toBe(3);
@@ -426,7 +430,7 @@ describe("check-ins — the bot chases the report, silently", () => {
   // Вес из отчёта — общий факт о теле: питание считает по нему калории, и второй
   // раз спрашивать его нельзя.
   it("files a weight mentioned in the report into the shared block", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: past() });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
     await call({
       op: "history_append",
       skill: "workout-plan",
@@ -449,7 +453,7 @@ describe("check-ins — the bot chases the report, silently", () => {
   });
 
   it("drops what it owes when the user asks to be left alone", async () => {
-    await call({ op: "expect", skill: "workout-plan", due: past() });
+    await call({ op: "expect", skill: "workout-plan", due: past(), about: day(0) });
     await call({ op: "expect_cancel", skill: "workout-plan" });
 
     const check = await call({ op: "due_check", skill: "workout-plan" });
@@ -578,5 +582,48 @@ describe("schedule — one-off changes that undo themselves", () => {
     // Отменённый перенос не оставляет следа: день снова обычный, а не «перенесённый сюда».
     expect(state.week.find((d: { date: string }) => d.date === iso(2)).status).toBe("planned");
     expect(state.week.find((d: { date: string }) => d.date === iso(3)).status).toBe("moved_here");
+  });
+});
+
+describe("everything the bot works with is a date, not a weekday", () => {
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  // Отчёт, пришедший утром следующего дня, — про вчерашнюю тренировку. Пометить
+  // его моментом сообщения значит потерять вчерашнюю и придумать сегодняшнюю.
+  it("files a report against the session it is about, not the day it arrived", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+    await call({
+      op: "expect",
+      skill: "workout-plan",
+      due: new Date(Date.now() - 12 * 3600 * 1000).toISOString(),
+      about: day(-1),
+    });
+
+    await call({ op: "history_append", skill: "workout-plan", event: { done: true, hard: "ok" } });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.call_payload?.params.recent.at(-1).for_date ?? null).toBe(day(-1));
+  });
+
+  it("refuses an expectation that does not say which session it is about", async () => {
+    const result = await call({
+      op: "expect",
+      skill: "workout-plan",
+      due: new Date().toISOString(),
+      about: "в среду",
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("YYYY-MM-DD");
+  });
+
+  it("stamps a spontaneous report with today", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+    await call({ op: "history_append", skill: "workout-plan", event: { done: true } });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.today).toBe(day(0));
+    expect(state.call_payload.params.recent.at(-1).for_date).toBe(day(0));
   });
 });
