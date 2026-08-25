@@ -324,3 +324,118 @@ export function logWeight(
 
   return { ...body, weight_kg: kg, weight_log: log };
 }
+
+/**
+ * Разовое изменение расписания: перенос или пропуск одного дня.
+ *
+ * Отдельно от профиля намеренно. «Перенеси среду на четверг» — про эту среду,
+ * а не про все среды: записать это в постоянное расписание значит навсегда лишить
+ * человека среды из-за одной командировки. Отдельно и от фактов: травма запрещает
+ * упражнения, а перенос двигает время, и смешивать их — значит однажды объяснять
+ * модели, почему «перенёс на четверг» убрало приседания.
+ */
+export type Override = {
+  date: string;
+  moved_to?: string | null;
+  time?: string | null;
+  reason?: string;
+};
+
+export function loadOverrides(root: string, skill: string, today: string): Override[] {
+  const path = join(skillDir(root, skill), "overrides.json");
+  const all = readJson<Override[]>(path, []);
+
+  // Прошедшее вычищается само: изменение на одну неделю, пережившее её, —
+  // это расписание, которое человек не менял, но которое изменилось.
+  const live = all.filter((o) => (o.moved_to ?? o.date) >= today);
+  if (live.length !== all.length) writeJsonAtomic(path, live);
+
+  return live;
+}
+
+export function saveOverrides(root: string, skill: string, items: Override[]): void {
+  writeJsonAtomic(join(skillDir(root, skill), "overrides.json"), items);
+}
+
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/** Дата в таймзоне человека, а не сервера: инстанс живёт в UTC, человек — нет. */
+export function localDate(now: Date, tz?: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz || "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(now);
+  } catch {
+    // Неизвестная таймзона — не повод уронить весь скилл.
+    return now.toISOString().slice(0, 10);
+  }
+}
+
+function addDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+export type Day = {
+  date: string;
+  weekday: string;
+  time?: string | null;
+  status: "planned" | "moved_here" | "moved_away" | "skipped";
+  reason?: string;
+};
+
+/**
+ * Расписание на ближайшие дни с учётом разовых изменений.
+ *
+ * Считает код, а не модель. Haiku ошибается в датах — «перенеси на четверг»
+ * превращается в прошлый четверг, — и человек получает напоминание не в тот день
+ * либо не получает вовсе.
+ */
+export function weekAhead(
+  days: string[],
+  time: string | null | undefined,
+  overrides: Override[],
+  today: string,
+  span = 7,
+): Day[] {
+  const planned = new Set(days.map((d) => d.slice(0, 3).toLowerCase()));
+  const out: Day[] = [];
+
+  for (let i = 0; i < span; i += 1) {
+    const date = addDays(today, i);
+    const weekday = WEEKDAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
+
+    const movedAway = overrides.find((o) => o.date === date && o.moved_to !== undefined);
+    const movedHere = overrides.find((o) => o.moved_to === date);
+
+    if (movedHere) {
+      out.push({
+        date,
+        weekday,
+        time: movedHere.time ?? time,
+        status: "moved_here",
+        reason: movedHere.reason,
+      });
+      continue;
+    }
+
+    if (!planned.has(weekday)) continue;
+
+    if (movedAway) {
+      out.push({
+        date,
+        weekday,
+        time: null,
+        status: movedAway.moved_to ? "moved_away" : "skipped",
+        reason: movedAway.reason,
+      });
+      continue;
+    }
+
+    out.push({ date, weekday, time, status: "planned" });
+  }
+
+  return out;
+}

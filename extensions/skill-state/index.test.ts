@@ -41,6 +41,9 @@ const SCHEMA = {
       question: "Занимался раньше?",
     },
     equipment: { type: "string[]", stage: "details", question: "Что есть из инвентаря?" },
+    days: { type: "string[]", stage: "details", question: "В какие дни?" },
+    time: { type: "string", stage: "details", question: "Во сколько?" },
+    tz: { type: "string", stage: "details", question: "В каком городе?" },
     height_cm: {
       type: "int",
       min: 100,
@@ -468,5 +471,112 @@ describe("history", () => {
     const { readdirSync } = await import("node:fs");
     const files = readdirSync(join(root, "skills", "workout-plan", "history"));
     expect(files).toHaveLength(3);
+  });
+});
+
+describe("schedule — one-off changes that undo themselves", () => {
+  const iso = (offsetDays: number) =>
+    new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+
+  async function withSchedule() {
+    await call({
+      op: "patch",
+      skill: "workout-plan",
+      patch: {
+        goal: "lose",
+        minutes: 45,
+        days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        time: "19:00",
+      },
+    });
+  }
+
+  it("resolves the week ahead so the model never does date arithmetic", async () => {
+    await withSchedule();
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.week).toHaveLength(7);
+    expect(state.week[0].date).toBe(state.today);
+    expect(state.week[0].time).toBe("19:00");
+  });
+
+  // «Перенеси среду на четверг» — про эту среду, а не про все среды. Записать это
+  // в постоянное расписание значит навсегда лишить человека среды из-за одной
+  // командировки.
+  it("moves a single day without touching the usual schedule", async () => {
+    await withSchedule();
+
+    await call({
+      op: "reschedule",
+      skill: "workout-plan",
+      date: iso(1),
+      moved_to: iso(2),
+      reason: "командировка",
+    });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    const moved = state.week.find((d: { date: string }) => d.date === iso(1));
+    const landed = state.week.find((d: { date: string }) => d.date === iso(2));
+
+    expect(moved.status).toBe("moved_away");
+    expect(landed.status).toBe("moved_here");
+    expect(landed.reason).toBe("командировка");
+
+    // Постоянное расписание не тронуто.
+    expect(state.profile.days).toContain("mon");
+  });
+
+  it("skips a day when there is nowhere to move it", async () => {
+    await withSchedule();
+
+    await call({ op: "reschedule", skill: "workout-plan", date: iso(1), reason: "гости" });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.week.find((d: { date: string }) => d.date === iso(1)).status).toBe("skipped");
+  });
+
+  // Изменение на одну неделю, пережившее её, — это расписание, которое человек
+  // не менял, но которое изменилось.
+  it("forgets a change once its day has passed", async () => {
+    await withSchedule();
+    await call({ op: "reschedule", skill: "workout-plan", date: iso(1), moved_to: iso(2) });
+
+    const { readFileSync, writeFileSync } = await import("node:fs");
+    const path = join(root, "skills", "workout-plan", "overrides.json");
+    const stale = JSON.parse(readFileSync(path, "utf8"));
+    stale[0] = { date: iso(-9), moved_to: iso(-8) };
+    writeFileSync(path, JSON.stringify(stale), "utf8");
+
+    await call({ op: "get", skill: "workout-plan" });
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(0);
+  });
+
+  // Перенос в прошлое — почти всегда промах модели в арифметике дат. Приняв его
+  // молча, получим расписание, которое ничего не поменяло, и необъяснимо
+  // пропавшее напоминание.
+  it("refuses to move a workout into the past", async () => {
+    await withSchedule();
+
+    const result = await call({
+      op: "reschedule",
+      skill: "workout-plan",
+      date: iso(1),
+      moved_to: iso(-3),
+    });
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("past");
+  });
+
+  it("replaces an earlier change to the same day instead of stacking them", async () => {
+    await withSchedule();
+
+    await call({ op: "reschedule", skill: "workout-plan", date: iso(1), moved_to: iso(2) });
+    await call({ op: "reschedule", skill: "workout-plan", date: iso(1), moved_to: iso(3) });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+    // Отменённый перенос не оставляет следа: день снова обычный, а не «перенесённый сюда».
+    expect(state.week.find((d: { date: string }) => d.date === iso(2)).status).toBe("planned");
+    expect(state.week.find((d: { date: string }) => d.date === iso(3)).status).toBe("moved_here");
   });
 });

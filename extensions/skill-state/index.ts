@@ -19,6 +19,7 @@ import {
   appendHistory,
   ensureRoot,
   loadFacts,
+  loadOverrides,
   loadPending,
   logWeight,
   missedStreak,
@@ -27,13 +28,17 @@ import {
   readProfile,
   readShared,
   recentHistory,
+  localDate,
   saveFacts,
+  saveOverrides,
   savePending,
   todayISO,
   validateFact,
   writeProfile,
   writeShared,
+  weekAhead,
   type Fact,
+  type Override,
   type Pending,
 } from "./store.js";
 
@@ -92,14 +97,21 @@ const skillStatePlugin = {
       }
     }
 
-    function snapshot(schema: SkillSchema, skill: string): Record<string, unknown> {
-      const today = todayISO();
-      const facts = activeFacts(loadFacts(stateDir, skill, today), today);
-
+    /** Общие блоки, объявленные схемой. */
+    function sharedBlocks(schema: SkillSchema): Record<string, Record<string, unknown>> {
       const blocks: Record<string, Record<string, unknown>> = {};
+
       for (const name of schema.shared ?? []) {
         blocks[name] = readShared(stateDir, name);
       }
+
+      return blocks;
+    }
+
+    function snapshot(schema: SkillSchema, skill: string): Record<string, unknown> {
+      const today = todayISO();
+      const facts = activeFacts(loadFacts(stateDir, skill, today), today);
+      const blocks = sharedBlocks(schema);
 
       // Общие поля подмешиваются в профиль: рост, рассказанный скиллу питания,
       // обязан считаться известным и тренировкам, иначе человек рассказывает
@@ -110,6 +122,20 @@ const skillStatePlugin = {
       const ready = readyToCall(schema, profile);
 
       const now = new Date();
+
+      // Расписание на неделю вперёд с учётом переносов. Считает код: модель
+      // ошибается в датах, и «перенеси на четверг» превращается в прошлый четверг —
+      // человек получает напоминание не в тот день или не получает вовсе.
+      const localToday = localDate(now, profile.tz as string | undefined);
+      const week = Array.isArray(profile.days)
+        ? weekAhead(
+            profile.days as string[],
+            profile.time as string | null,
+            loadOverrides(stateDir, skill, localToday),
+            localToday,
+          )
+        : [];
+
       const pending = loadPending(stateDir, skill)
         .map((item) => ({ ...item, overdue: overdueDays(item, now) >= 0 }))
         .sort((a, b) => (a.due < b.due ? -1 : 1));
@@ -130,6 +156,8 @@ const skillStatePlugin = {
         // пробуждении: человек прислал «привет», а за ним висит несданный отчёт
         // за среду — спрашивать надо про среду.
         pending,
+        today: localToday,
+        week,
         missed_streak: missedStreak(events),
         ready,
         // Запрос собирает код, а не модель: иначе «строгая структура» держится
@@ -168,6 +196,7 @@ const skillStatePlugin = {
             Type.Literal("fact_close"),
             Type.Literal("history_append"),
             Type.Literal("expect"),
+            Type.Literal("reschedule"),
             Type.Literal("due_check"),
             Type.Literal("expect_cancel"),
           ],
@@ -189,6 +218,22 @@ const skillStatePlugin = {
         ),
         fact_id: Type.Optional(
           Type.String({ description: "op=fact_close: which fact ended early" }),
+        ),
+        date: Type.Optional(
+          Type.String({ description: "op=reschedule: the day being moved or skipped, YYYY-MM-DD" }),
+        ),
+        moved_to: Type.Optional(
+          Type.String({
+            description:
+              "op=reschedule: the new day, YYYY-MM-DD. Omit to skip that day entirely. " +
+              "This affects that one day only — the usual schedule stays as it is",
+          }),
+        ),
+        time: Type.Optional(
+          Type.String({ description: "op=reschedule: new time for the moved day, HH:MM" }),
+        ),
+        reason: Type.Optional(
+          Type.String({ description: "op=reschedule: why, in the user's own words" }),
         ),
         due: Type.Optional(
           Type.String({
@@ -367,6 +412,40 @@ const skillStatePlugin = {
             }
 
             return reply({ ...snapshot(schema, skill), closed: closeId ?? null });
+          }
+
+          case "reschedule": {
+            const date = args.date as string;
+            if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+              return fail("reschedule needs `date` as YYYY-MM-DD — which day is moving");
+            }
+
+            const movedTo = (args.moved_to as string) ?? null;
+            if (movedTo && !/^\d{4}-\d{2}-\d{2}$/.test(movedTo)) {
+              return fail("`moved_to` must be YYYY-MM-DD, or omit it to skip the day entirely");
+            }
+
+            const profile = withShared(schema, readProfile(stateDir, skill), sharedBlocks(schema));
+            const localToday = localDate(new Date(), profile.tz as string | undefined);
+
+            if ((movedTo ?? date) < localToday) {
+              // Перенос в прошлое — почти всегда промах модели в арифметике дат,
+              // а не намерение человека. Молча приняв его, мы получим расписание,
+              // которое ничего не меняет, и необъяснимое отсутствие напоминания.
+              return fail(`${movedTo ?? date} is in the past — today is ${localToday}`);
+            }
+
+            const items = loadOverrides(stateDir, skill, localToday).filter((o) => o.date !== date);
+            const item: Override = {
+              date,
+              moved_to: movedTo,
+              time: (args.time as string) ?? null,
+              reason: (args.reason as string) || undefined,
+            };
+
+            saveOverrides(stateDir, skill, [...items, item]);
+
+            return reply({ ...snapshot(schema, skill), rescheduled: item });
           }
 
           case "due_check": {
