@@ -17,8 +17,10 @@ import {
 import {
   activeFacts,
   appendHistory,
+  dueItems,
   ensureRoot,
   expiredFacts,
+  loadCadence,
   loadFacts,
   loadOverrides,
   loadPending,
@@ -34,6 +36,7 @@ import {
   readShared,
   recentHistory,
   localDate,
+  saveCadence,
   saveFacts,
   saveOverrides,
   saveRatings,
@@ -186,6 +189,9 @@ const skillStatePlugin = {
         pending,
         liked,
         disliked,
+        // Что пора повторить: стрижка раз в месяц, маникюр раз в три недели.
+        // Салон об этом не напоминает — он не знает, когда человек был у другого.
+        due_items: dueItems(loadCadence(stateDir, skill), window, localToday),
         // Предложенное на этой неделе — чтобы не приходило четвёртый раз подряд.
         recent_items: recentItems(window, RECENT_DAYS, localToday),
         today: localToday,
@@ -236,6 +242,7 @@ const skillStatePlugin = {
             Type.Literal("expect"),
             Type.Literal("reschedule"),
             Type.Literal("rate"),
+            Type.Literal("cadence_set"),
             Type.Literal("due_check"),
             Type.Literal("expect_cancel"),
           ],
@@ -276,6 +283,18 @@ const skillStatePlugin = {
         ),
         item: Type.Optional(
           Type.String({ description: 'op=rate: what is being rated, e.g. "овсянка с бананом"' }),
+        ),
+        every_days: Type.Optional(
+          Type.Number({
+            description:
+              "op=cadence_set: how often `item` repeats, in days. Take it from what the user " +
+              "says («стригусь раз в месяц» → 30) or from the gap between their own visits",
+          }),
+        ),
+        note: Type.Optional(
+          Type.String({
+            description: "op=cadence_set: anything worth remembering about the rhythm",
+          }),
         ),
         score: Type.Optional(
           Type.Number({
@@ -551,6 +570,31 @@ const skillStatePlugin = {
             return reply(snapshot(schema, skill));
           }
 
+          case "cadence_set": {
+            const item = (args.item as string) ?? "";
+            const every = args.every_days;
+
+            if (!item.trim()) {
+              return fail("cadence_set needs `item` — what repeats");
+            }
+            if (typeof every !== "number" || every < 1 || every > 365) {
+              return fail("cadence_set needs `every_days` between 1 and 365");
+            }
+
+            // Один ритм на услугу: две записи однажды разойдутся, и бот скажет
+            // «пора стричься» тому, кто вчера от парикмахера.
+            const kept = loadCadence(stateDir, skill).filter(
+              (c) => c.item.trim().toLowerCase() !== item.trim().toLowerCase(),
+            );
+
+            saveCadence(stateDir, skill, [
+              ...kept,
+              { item: item.trim(), every_days: every, note: (args.note as string) || undefined },
+            ]);
+
+            return reply(snapshot(schema, skill));
+          }
+
           case "due_check": {
             // Отдельная операция, а не «посмотри в pending и реши сам»: этот вызов
             // приходит из молчаливой крон-задачи, и цена ошибки несимметрична.
@@ -562,7 +606,19 @@ const skillStatePlugin = {
               .filter((item) => overdueDays(item, now) >= 0)
               .sort((a, b) => (a.due < b.due ? -1 : 1));
 
-            if (due.length === 0) {
+            const events = recentHistory(stateDir, skill, HISTORY_WINDOW) as Array<
+              Record<string, unknown>
+            >;
+
+            // Молчаливая крон-задача одна на скилл, поэтому здесь же смотрим, не пора ли
+            // повторить услугу: два отдельных крона писали бы человеку дважды подряд.
+            const overdue = dueItems(
+              loadCadence(stateDir, skill),
+              events,
+              localDate(now, readProfile(stateDir, skill).tz as string | undefined),
+            ).filter((d) => d.due);
+
+            if (due.length === 0 && overdue.length === 0) {
               return reply({
                 status: "ok",
                 skill,
@@ -571,15 +627,12 @@ const skillStatePlugin = {
               });
             }
 
-            const events = recentHistory(stateDir, skill, RECENT_EVENTS) as Array<
-              Record<string, unknown>
-            >;
-
             return reply({
               status: "ok",
               skill,
               ask: true,
-              pending: due[0],
+              pending: due[0] ?? null,
+              due_items: overdue,
               // Три пропуска подряд — это разговор не про сегодняшнюю тренировку,
               // а про то, что план не подошёл. Спрашивать «как прошло?» четвёртый
               // раз бессмысленно и назойливо.
