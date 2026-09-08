@@ -1,7 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { RENDERED_BLOCKS, writeUserMd } from "./profile-view.js";
 import {
   callPayload,
   mergeProfile,
@@ -105,6 +106,29 @@ const skillStatePlugin = {
   register(api: OpenClawPluginApi) {
     const stateDir = (api.pluginConfig?.stateDir as string) || DEFAULT_STATE_DIR;
     const skillsDir = (api.pluginConfig?.skillsDir as string) || DEFAULT_SKILLS_DIR;
+    // Рабочая область выводится из стора, а не задаётся вторым абсолютным путём:
+    // они лежат рядом внутри одного тома, и настроенный `stateDir` в тесте или на
+    // другой раскладке должен тянуть `USER.md` за собой, а не оставлять его в проде.
+    const workspaceDir =
+      (api.pluginConfig?.workspaceDir as string) || join(dirname(stateDir), "workspace");
+
+    /**
+     * Единственная точка записи общего блока.
+     *
+     * Обёртка, а не вызов `writeShared` по месту: `USER.md` обязан следовать за стором
+     * при каждой записи, а два места записи означают, что однажды добавится третье
+     * и представление тихо отстанет от правды.
+     */
+    function saveShared(name: string, value: Record<string, unknown>): void {
+      writeShared(stateDir, name, value);
+
+      if (!RENDERED_BLOCKS.includes(name as (typeof RENDERED_BLOCKS)[number])) return;
+
+      writeUserMd(workspaceDir, {
+        person: readShared(stateDir, "person"),
+        body: readShared(stateDir, "body"),
+      });
+    }
 
     /** Схема приезжает с гейтвея рядом со SKILL.md — тот же файл проверяет вызов там. */
     function loadSchema(skill: string): SkillSchema | null {
@@ -376,7 +400,7 @@ const skillStatePlugin = {
             }
 
             for (const [name, value] of Object.entries(shared)) {
-              writeShared(stateDir, name, { ...readShared(stateDir, name), ...value });
+              saveShared(name, { ...readShared(stateDir, name), ...value });
             }
 
             return reply(snapshot(schema, skill));
@@ -500,11 +524,7 @@ const skillStatePlugin = {
             // Вес из отчёта — это общий факт о теле, а не запись в дневнике
             // тренировок: питание считает по нему калории.
             if (typeof event.weight_kg === "number") {
-              writeShared(
-                stateDir,
-                "body",
-                logWeight(readShared(stateDir, "body"), event.weight_kg, today),
-              );
+              saveShared("body", logWeight(readShared(stateDir, "body"), event.weight_kg, today));
             }
 
             return reply({ ...snapshot(schema, skill), closed: closeId ?? null });

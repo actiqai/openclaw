@@ -11,6 +11,10 @@
       "skillsDir": {
         "type": "string",
         "description": "Where SKILL.md and schema.json are mounted (e.g. /opt/actiq-skills)"
+      },
+      "workspaceDir": {
+        "type": "string",
+        "description": "Where USER.md is rendered from the shared blocks. Defaults to the workspace next to stateDir; set it explicitly in tests so the file does not land in a shared temp dir"
       }
     }
   }

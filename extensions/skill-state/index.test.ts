@@ -62,6 +62,9 @@ const SCHEMA = {
 
 let root: string;
 let skillsDir: string;
+// Рабочая область задаётся явно: по умолчанию она выводится из `stateDir`, и тест
+// со временным стором писал бы `USER.md` рядом с ним — то есть в общий /tmp.
+let workspaceDir: string;
 let tool: RegisteredTool;
 
 function call(args: Record<string, unknown>) {
@@ -71,13 +74,14 @@ function call(args: Record<string, unknown>) {
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "actiq-state-"));
   skillsDir = mkdtempSync(join(tmpdir(), "actiq-skills-"));
+  workspaceDir = mkdtempSync(join(tmpdir(), "actiq-workspace-"));
 
   mkdirSync(join(skillsDir, "workout-plan"), { recursive: true });
   writeFileSync(join(skillsDir, "workout-plan", "schema.json"), JSON.stringify(SCHEMA), "utf8");
 
   const tools: RegisteredTool[] = [];
   skillStatePlugin.register({
-    pluginConfig: { stateDir: root, skillsDir },
+    pluginConfig: { stateDir: root, skillsDir, workspaceDir },
     registerTool: (t: RegisteredTool) => tools.push(t),
     logger: { info: () => {} },
   } as never);
@@ -90,6 +94,7 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   rmSync(skillsDir, { recursive: true, force: true });
+  rmSync(workspaceDir, { recursive: true, force: true });
 });
 
 describe("stage — the thing the model cannot fake", () => {
@@ -119,7 +124,7 @@ describe("stage — the thing the model cannot fake", () => {
 
     const tools: RegisteredTool[] = [];
     skillStatePlugin.register({
-      pluginConfig: { stateDir: root, skillsDir },
+      pluginConfig: { stateDir: root, skillsDir, workspaceDir },
       registerTool: (t: RegisteredTool) => tools.push(t),
       logger: { info: () => {} },
     } as never);
@@ -386,7 +391,7 @@ describe("check-ins — the bot chases the report, silently", () => {
 
     const tools: RegisteredTool[] = [];
     skillStatePlugin.register({
-      pluginConfig: { stateDir: root, skillsDir },
+      pluginConfig: { stateDir: root, skillsDir, workspaceDir },
       registerTool: (t: RegisteredTool) => tools.push(t),
       logger: { info: () => {} },
     } as never);
@@ -885,5 +890,57 @@ describe("cadence — the thing no salon does for you", () => {
       (await call({ op: "cadence_set", skill: "workout-plan", item: "стрижка", every_days: 0 }))
         .status,
     ).toBe("error");
+  });
+});
+
+// `USER.md` — представление стора, а не второй профиль. До этого на инстансе было два
+// места, где живёт человек: вольный `USER.md`, который читается в bootstrap на каждом
+// прогоне, и строгий стор, который сам в контекст не попадает. Синхронизировать их
+// было нечем, и оба стояли пустые.
+describe("USER.md follows the store", () => {
+  const PROFILE_SCHEMA = {
+    version: 1,
+    skill: "profile-probe",
+    shared: ["person", "body"],
+    stages: ["basics"],
+    fields: {
+      city: { type: "string", shared: "person", stage: "basics", question: "В каком городе?" },
+      weight_kg: { type: "number", shared: "body", stage: "basics", question: "Сколько весишь?" },
+      goal: { type: "string", stage: "basics", question: "Чего хочется?" },
+    },
+    call: { action: "probe", required: [], include: ["goal"] },
+  };
+
+  beforeEach(() => {
+    mkdirSync(join(skillsDir, "profile-probe"), { recursive: true });
+    writeFileSync(
+      join(skillsDir, "profile-probe", "schema.json"),
+      JSON.stringify(PROFILE_SCHEMA),
+      "utf8",
+    );
+  });
+
+  it("prints a shared field the moment it is written", async () => {
+    await call({ op: "patch", skill: "profile-probe", patch: { city: "Москва" } });
+
+    expect(readFileSync(join(workspaceDir, "USER.md"), "utf8")).toContain("**Город:** Москва");
+  });
+
+  it("prints both blocks, not just the one that was touched", async () => {
+    await call({ op: "patch", skill: "profile-probe", patch: { weight_kg: 74 } });
+    await call({ op: "patch", skill: "profile-probe", patch: { city: "Москва" } });
+
+    const md = readFileSync(join(workspaceDir, "USER.md"), "utf8");
+    expect(md).toContain("**Город:** Москва");
+    expect(md).toContain("**Вес, кг:** 74");
+  });
+
+  // Скилловое поле в общий файл не попадает: `USER.md` про человека, а не про то,
+  // чего он хочет от тренировок. Иначе файл, который читается в каждом запросе,
+  // растёт вместе со всеми профилями сразу.
+  it("stays untouched when only the skill's own profile changes", async () => {
+    await call({ op: "patch", skill: "profile-probe", patch: { goal: "похудеть" } });
+
+    expect(existsSync(join(workspaceDir, "USER.md"))).toBe(false);
   });
 });
