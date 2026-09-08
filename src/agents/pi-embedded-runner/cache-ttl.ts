@@ -8,7 +8,27 @@ export type CacheTtlEntryData = {
   modelId?: string;
 };
 
-export function isCacheTtlEligibleProvider(provider: string, modelId: string): boolean {
+/**
+ * Считает ли этот провайдер кэш по правилам Anthropic.
+ *
+ * Решает объявленный API, а не имя провайдера. Имя — это то, как пользователь назвал
+ * запись в своём конфиге, и опираться на него значит отключать обрезку контекста для
+ * каждого прокси к тому же самому API. Так и вышло: провайдер, указывающий на
+ * собственный шлюз перед Anthropic, в список имён не попадал, обрезка не включалась
+ * ни разу, и заметить это было нечем — предикат возвращает `false` молча, а
+ * расширение просто не грузится.
+ *
+ * Имена оставлены как запасной путь для конфигов без явного `api`.
+ */
+export function isCacheTtlEligibleProvider(
+  provider: string,
+  modelId: string,
+  api?: string,
+): boolean {
+  if (api?.toLowerCase() === "anthropic-messages") {
+    return true;
+  }
+
   const normalizedProvider = provider.toLowerCase();
   const normalizedModelId = modelId.toLowerCase();
   if (normalizedProvider === "anthropic") {
