@@ -1031,7 +1031,7 @@ export async function runEmbeddedAttempt(
         if (!timedOutDuringCompaction) {
           const shouldTrackCacheTtl =
             params.config?.agents?.defaults?.contextPruning?.mode === "cache-ttl" &&
-            isCacheTtlEligibleProvider(params.provider, params.modelId);
+            isCacheTtlEligibleProvider(params.provider, params.modelId, params.model?.api);
           if (shouldTrackCacheTtl) {
             appendCacheTtlTimestamp(sessionManager, {
               timestamp: Date.now(),

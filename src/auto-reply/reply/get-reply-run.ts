@@ -40,7 +40,11 @@ import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { runReplyAgent } from "./agent-runner.js";
 import { applySessionHints } from "./body.js";
 import { buildGroupChatContext, buildGroupIntro } from "./groups.js";
-import { buildInboundMetaSystemPrompt, buildInboundUserContextPrefix } from "./inbound-meta.js";
+import {
+  buildInboundMetaSystemPrompt,
+  buildInboundMetaTurnBlock,
+  buildInboundUserContextPrefix,
+} from "./inbound-meta.js";
 import { resolveQueueSettings } from "./queue.js";
 import { routeReply } from "./route-reply.js";
 import { BARE_SESSION_RESET_PROMPT } from "./session-reset-prompt.js";
@@ -218,9 +222,15 @@ export async function runPreparedReply(
         }
       : { ...sessionCtx, ThreadStarterBody: undefined },
   );
+  // Конверт этого сообщения идёт здесь, а не в системном промпте: он меняется каждый
+  // ход, а системный блок стоит перед всей перепиской и обнуляет её кэш целиком.
+  // См. buildInboundMetaTurnBlock.
+  const inboundTurnMeta = buildInboundMetaTurnBlock(
+    isNewSession ? sessionCtx : { ...sessionCtx, ThreadStarterBody: undefined },
+  );
   const baseBodyForPrompt = isBareSessionReset
     ? baseBodyFinal
-    : [inboundUserContext, baseBodyFinal].filter(Boolean).join("\n\n");
+    : [inboundTurnMeta, inboundUserContext, baseBodyFinal].filter(Boolean).join("\n\n");
   const baseBodyTrimmed = baseBodyForPrompt.trim();
   const hasMediaAttachment = Boolean(
     sessionCtx.MediaPath || (sessionCtx.MediaPaths && sessionCtx.MediaPaths.length > 0),
