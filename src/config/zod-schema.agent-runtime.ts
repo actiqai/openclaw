@@ -252,6 +252,13 @@ export const ToolsWebSearchSchema = z
   .strict()
   .optional();
 
+// Keeps `readability` and `firecrawl`, which the tool already reads.
+//
+// web-fetch.ts resolves both (resolveFetchReadabilityEnabled, resolveFirecrawlConfig)
+// and types.tools.ts declares them, but this schema is `.strict()` and never listed
+// them — so a config that configures Firecrawl is rejected outright, and the whole
+// config with it. The runtime supporting a setting the validator refuses is the worst
+// of the two failure modes: the feature looks available and the fix looks unrelated.
 export const ToolsWebFetchSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -261,6 +268,18 @@ export const ToolsWebFetchSchema = z
     cacheTtlMinutes: z.number().nonnegative().optional(),
     maxRedirects: z.number().int().nonnegative().optional(),
     userAgent: z.string().optional(),
+    readability: z.boolean().optional(),
+    firecrawl: z
+      .object({
+        enabled: z.boolean().optional(),
+        apiKey: z.string().optional().register(sensitive),
+        baseUrl: z.string().optional(),
+        onlyMainContent: z.boolean().optional(),
+        maxAgeMs: z.number().nonnegative().optional(),
+        timeoutSeconds: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .optional();
