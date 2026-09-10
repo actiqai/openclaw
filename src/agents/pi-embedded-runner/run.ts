@@ -447,6 +447,8 @@ export async function runEmbeddedPiAgent(
             prompt,
             images: params.images,
             disableTools: params.disableTools,
+            disableMessageTool: params.disableMessageTool,
+            requireExplicitMessageTarget: params.requireExplicitMessageTarget,
             provider,
             modelId,
             model,
