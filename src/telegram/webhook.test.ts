@@ -9,10 +9,12 @@ const handlerSpy = vi.fn(
 );
 const setWebhookSpy = vi.fn();
 const stopSpy = vi.fn();
+const initSpy = vi.fn();
 const webhookCallbackSpy = vi.fn(() => handlerSpy);
 
 const createTelegramBotSpy = vi.fn(() => ({
   api: { setWebhook: setWebhookSpy },
+  init: initSpy,
   stop: stopSpy,
 }));
 
@@ -100,6 +102,32 @@ describe("startTelegramWebhook", () => {
     }
     await fetch(`http://127.0.0.1:${addr.port}/hook`, { method: "POST" });
     expect(handlerSpy).toHaveBeenCalled();
+    abort.abort();
+  });
+
+  it("initializes the bot before the first update can arrive", async () => {
+    initSpy.mockClear();
+    handlerSpy.mockClear();
+    const abort = new AbortController();
+    const { server } = await startTelegramWebhook({
+      token: "tok",
+      secret: "secret",
+      config: { bindings: [] },
+      port: 0,
+      abortSignal: abort.signal,
+      path: "/hook",
+    });
+    // Ленивая инициализация внутри grammy съедала бы первое обновление, и Telegram
+    // переприсылал бы его через минуту.
+    expect(initSpy).toHaveBeenCalled();
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("no addr");
+    }
+    await fetch(`http://127.0.0.1:${addr.port}/hook`, { method: "POST" });
+    expect(handlerSpy).toHaveBeenCalled();
+
     abort.abort();
   });
 

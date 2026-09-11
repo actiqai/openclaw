@@ -139,6 +139,19 @@ export async function startTelegramWebhook(opts: {
       }),
   });
 
+  // Знакомимся с самими собой до того, как начнём слушать.
+  //
+  // Иначе это делает grammy — лениво, на первом же пришедшем обновлении, — и то
+  // обновление пропадает: Telegram не дожидается ответа, считает доставку неудачной
+  // и присылает то же сообщение заново через минуту. Для человека в чате это
+  // выглядит как «бот проигнорировал и ответил только спустя минуту», причём ровно
+  // один раз после каждого перезапуска.
+  await withTelegramApiErrorLogging({
+    operation: "init",
+    runtime,
+    fn: () => bot.init(),
+  });
+
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
   runtime.log?.(`webhook listening on ${publicUrl}`);
 
