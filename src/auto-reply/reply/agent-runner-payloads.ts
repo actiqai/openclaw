@@ -2,6 +2,7 @@ import type { ReplyToMode } from "../../config/types.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
 import { logVerbose } from "../../globals.js";
+import { guardReplyText } from "../../infra/internal-leak-guard.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { formatBunFetchSocketError, isBunFetchSocketError } from "./agent-runner-utils.js";
@@ -41,6 +42,17 @@ export function buildReplyPayloads(params: {
 
         if (payload.isError && text && isBunFetchSocketError(text)) {
           text = formatBunFetchSocketError(text);
+        }
+
+        // Служебное наружу не уходит. Проверяется до всего остального: утечка
+        // может и не содержать HEARTBEAT_OK, а значит, ниже её никто не поймает.
+        // Вложения снимаем вместе с текстом — на скриншоте внутреннего не меньше.
+        const guarded = guardReplyText(text);
+
+        if (guarded.leaked) {
+          return [
+            { ...payload, text: guarded.text ?? undefined, mediaUrl: undefined, mediaUrls: [] },
+          ];
         }
 
         if (!text || !text.includes("HEARTBEAT_OK")) {

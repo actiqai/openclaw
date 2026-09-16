@@ -27,6 +27,7 @@ import {
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
+import { findInternalLeak } from "../../infra/internal-leak-guard.js";
 import { defaultRuntime } from "../../runtime.js";
 import {
   isMarkdownCapableMessageChannel,
@@ -110,6 +111,14 @@ export async function runAgentTurnWithFallback(params: {
           return { skip: true };
         }
         let text = payload.text;
+
+        // Потоковый кусок с внутренностями не показываем вовсе: замену на
+        // нейтральную строку сделает финальный ответ, а показать сначала утечку,
+        // а потом извинение — хуже, чем чуть подождать.
+        if (!params.isHeartbeat && findInternalLeak(text)) {
+          return { skip: true };
+        }
+
         if (!params.isHeartbeat && text?.includes("HEARTBEAT_OK")) {
           const stripped = stripHeartbeatToken(text, {
             mode: "message",
