@@ -30,6 +30,22 @@ vi.mock("./bot.js", () => ({
   createTelegramBot: (...args: unknown[]) => createTelegramBotSpy(...args),
 }));
 
+/** Обновление в том виде, в каком его шлёт Telegram: с секретом и телом. */
+async function postUpdate(
+  port: number,
+  body: string = JSON.stringify({ update_id: 1 }),
+  secret: string | null = "secret",
+) {
+  return await fetch(`http://127.0.0.1:${port}/hook`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(secret === null ? {} : { "X-Telegram-Bot-Api-Secret-Token": secret }),
+    },
+    body,
+  });
+}
+
 describe("startTelegramWebhook", () => {
   it("starts server, registers webhook, and serves health", async () => {
     createTelegramBotSpy.mockClear();
@@ -65,7 +81,10 @@ describe("startTelegramWebhook", () => {
           setWebhook: expect.any(Function),
         }),
       }),
-      "http",
+      // Адаптер теперь наш: тело читает и разбирает вызывающий код, а grammy
+      // получает готовое обновление. Штатный "http" парсил JSON внутри
+      // обработчика `end`, и любой неразбираемый запрос убивал процесс.
+      expect.any(Function),
       {
         secretToken: "secret",
         onTimeout: "return",
@@ -100,7 +119,7 @@ describe("startTelegramWebhook", () => {
     if (!addr || typeof addr === "string") {
       throw new Error("no addr");
     }
-    await fetch(`http://127.0.0.1:${addr.port}/hook`, { method: "POST" });
+    await postUpdate(addr.port);
     expect(handlerSpy).toHaveBeenCalled();
     abort.abort();
   });
@@ -125,7 +144,7 @@ describe("startTelegramWebhook", () => {
     if (!addr || typeof addr === "string") {
       throw new Error("no addr");
     }
-    await fetch(`http://127.0.0.1:${addr.port}/hook`, { method: "POST" });
+    await postUpdate(addr.port);
     expect(handlerSpy).toHaveBeenCalled();
 
     abort.abort();
@@ -137,5 +156,71 @@ describe("startTelegramWebhook", () => {
         token: "tok",
       }),
     ).rejects.toThrow(/requires a non-empty secret token/i);
+  });
+});
+
+describe("телега: кривое тело не роняет процесс", () => {
+  async function startOnFreePort() {
+    handlerSpy.mockClear();
+    const abort = new AbortController();
+    const { server } = await startTelegramWebhook({
+      token: "tok",
+      secret: "secret",
+      config: { bindings: [] },
+      port: 0,
+      abortSignal: abort.signal,
+      path: "/hook",
+    });
+    const addr = server.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("no addr");
+    }
+
+    return { port: addr.port, abort };
+  }
+
+  // Ради этого всё и делалось. Штатный адаптер grammy разбирает тело внутри
+  // обработчика `end`, без try/catch: исключение улетает в uncaughtException и
+  // убивает инстанс целиком — вместе со всеми остальными разговорами.
+  it("отвечает 400 на пустое тело, а не умирает", async () => {
+    const { port, abort } = await startOnFreePort();
+
+    const res = await postUpdate(port, "");
+
+    expect(res.status).toBe(400);
+    expect(handlerSpy).not.toHaveBeenCalled();
+    abort.abort();
+  });
+
+  it("отвечает 400 на тело, которое не разбирается", async () => {
+    const { port, abort } = await startOnFreePort();
+
+    const res = await postUpdate(port, "{ это не json");
+
+    expect(res.status).toBe(400);
+    expect(handlerSpy).not.toHaveBeenCalled();
+    abort.abort();
+  });
+
+  it("передаёт разобранное обновление обработчику", async () => {
+    const { port, abort } = await startOnFreePort();
+
+    await postUpdate(port, JSON.stringify({ update_id: 42 }));
+
+    expect(handlerSpy).toHaveBeenCalled();
+    expect(handlerSpy.mock.calls[0]?.[2]).toEqual({ update_id: 42 });
+    abort.abort();
+  });
+
+  // Чужому запросу незачем давать набирать мегабайт в нашей памяти: секрет
+  // сверяется до чтения тела.
+  it("отвечает 401 без секрета и не читает тело", async () => {
+    const { port, abort } = await startOnFreePort();
+
+    const res = await postUpdate(port, JSON.stringify({ update_id: 1 }), null);
+
+    expect(res.status).toBe(401);
+    expect(handlerSpy).not.toHaveBeenCalled();
+    abort.abort();
   });
 });
