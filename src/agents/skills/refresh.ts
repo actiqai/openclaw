@@ -24,7 +24,20 @@ const log = createSubsystemLogger("gateway/skills");
 const listeners = new Set<(event: SkillsChangeEvent) => void>();
 const workspaceVersions = new Map<string, number>();
 const watchers = new Map<string, SkillsWatchState>();
-let globalVersion = 0;
+// Starts at the process start time, not 0.
+//
+// A session stores its skills snapshot on disk, and a stored snapshot is rebuilt
+// only when this version is ahead of it. The version itself lives in memory, so at
+// 0 a fresh process could never be ahead: whatever changed in the skill dirs while
+// it was down — and the platform installs skills and then restarts the client —
+// stayed invisible to every existing session. 24.09.2026 the assistant listed
+// weather and host hardening, not one of the four installed platform skills: the
+// main session's snapshot was from the day the image was built (CLT-053).
+//
+// With the start time every session rebuilds its snapshot once per process start,
+// on its next turn. The prompt text is the same when nothing changed, so the model
+// cache is not affected.
+let globalVersion = Date.now();
 
 export const DEFAULT_SKILLS_WATCH_IGNORED: RegExp[] = [
   /(^|[\\/])\.git([\\/]|$)/,
