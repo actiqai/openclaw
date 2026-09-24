@@ -68,3 +68,26 @@ describe("ensureSkillsWatcher", () => {
     expect(ignored.some((re) => re.test("/tmp/workspace/skills/my-skill/SKILL.md"))).toBe(false);
   });
 });
+
+describe("getSkillsSnapshotVersion", () => {
+  // CLT-053: a snapshot stored by an earlier process must look stale to this one.
+  // At 0 the refresh check (`version > 0 && stored < version`) never fired after a
+  // restart, and skills installed while the client was down never reached a session.
+  it("is ahead of any snapshot stored before the process started", async () => {
+    const before = Date.now();
+    vi.resetModules();
+    const mod = await import("./refresh.js");
+
+    expect(mod.getSkillsSnapshotVersion()).toBeGreaterThan(0);
+    expect(mod.getSkillsSnapshotVersion()).toBeGreaterThanOrEqual(before);
+    expect(mod.getSkillsSnapshotVersion("/tmp/workspace")).toBeGreaterThanOrEqual(before);
+  });
+
+  it("still moves forward on a bump", async () => {
+    vi.resetModules();
+    const mod = await import("./refresh.js");
+    const start = mod.getSkillsSnapshotVersion();
+
+    expect(mod.bumpSkillsSnapshotVersion()).toBeGreaterThan(start);
+  });
+});
