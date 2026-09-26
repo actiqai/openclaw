@@ -135,3 +135,48 @@ describe("resolveMedia getFile retry", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("resolveMedia download address", () => {
+  beforeEach(() => {
+    fetchRemoteMedia.mockReset();
+    saveMediaBuffer.mockReset();
+    fetchRemoteMedia.mockResolvedValue({
+      buffer: Buffer.from("audio"),
+      contentType: "audio/ogg",
+      fileName: "file_0.oga",
+    });
+    saveMediaBuffer.mockResolvedValue({ path: "/tmp/file_0.oga", contentType: "audio/ogg" });
+  });
+
+  // Инстанс ходит в Telegram через роутер, и токен у него не настоящий: по
+  // api.telegram.org такой файл не скачать. Файл обязан идти тем же apiRoot.
+  it("downloads through the configured apiRoot", async () => {
+    const getFile = vi.fn().mockResolvedValue({ file_path: "voice/file_0.oga" });
+
+    await resolveMedia(
+      makeCtx("voice", getFile),
+      10_000_000,
+      "tok123",
+      undefined,
+      "https://router.example.com/telegram/",
+    );
+
+    expect(fetchRemoteMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "https://router.example.com/telegram/file/bottok123/voice/file_0.oga",
+      }),
+    );
+  });
+
+  it("falls back to api.telegram.org without apiRoot", async () => {
+    const getFile = vi.fn().mockResolvedValue({ file_path: "voice/file_0.oga" });
+
+    await resolveMedia(makeCtx("voice", getFile), 10_000_000, "tok123");
+
+    expect(fetchRemoteMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "https://api.telegram.org/file/bottok123/voice/file_0.oga",
+      }),
+    );
+  });
+});
