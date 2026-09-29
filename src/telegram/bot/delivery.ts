@@ -298,11 +298,14 @@ export async function deliverReplies(params: {
   return { delivered: hasDelivered };
 }
 
+const TELEGRAM_API_ROOT = "https://api.telegram.org";
+
 export async function resolveMedia(
   ctx: TelegramContext,
   maxBytes: number,
   token: string,
   proxyFetch?: typeof fetch,
+  apiRoot?: string,
 ): Promise<{
   path: string;
   contentType?: string;
@@ -311,7 +314,11 @@ export async function resolveMedia(
 } | null> {
   const msg = ctx.message;
   const downloadAndSaveTelegramFile = async (filePath: string, fetchImpl: typeof fetch) => {
-    const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
+    // Файлы — тем же адресом, что и методы API. Инстанс знает только свой токен и
+    // адрес роутера; по зашитому api.telegram.org его токен не значит ничего, и
+    // голосовое, фото, документ падали на скачивании.
+    const root = (apiRoot?.trim() || TELEGRAM_API_ROOT).replace(/\/+$/, "");
+    const url = `${root}/file/bot${token}/${filePath}`;
     const fetched = await fetchRemoteMedia({
       url,
       fetchImpl,
