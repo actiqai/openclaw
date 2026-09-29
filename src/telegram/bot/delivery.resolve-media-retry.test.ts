@@ -179,4 +179,35 @@ describe("resolveMedia download address", () => {
       }),
     );
   });
+
+  // Прод: роутер на частном адресе. Без разрешения его хоста защита от SSRF
+  // роняла скачивание, и бот молчал на каждое голосовое.
+  it("allows the apiRoot host through the SSRF guard", async () => {
+    const getFile = vi.fn().mockResolvedValue({ file_path: "voice/file_0.oga" });
+
+    await resolveMedia(
+      makeCtx("voice", getFile),
+      10_000_000,
+      "tok123",
+      undefined,
+      "http://10.0.1.20:8080/telegram",
+    );
+
+    expect(fetchRemoteMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "http://10.0.1.20:8080/telegram/file/bottok123/voice/file_0.oga",
+        ssrfPolicy: { allowedHostnames: ["10.0.1.20"] },
+      }),
+    );
+  });
+
+  it("keeps the default SSRF guard without apiRoot", async () => {
+    const getFile = vi.fn().mockResolvedValue({ file_path: "voice/file_0.oga" });
+
+    await resolveMedia(makeCtx("voice", getFile), 10_000_000, "tok123");
+
+    expect(fetchRemoteMedia).toHaveBeenCalledWith(
+      expect.objectContaining({ ssrfPolicy: undefined }),
+    );
+  });
 });

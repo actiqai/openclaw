@@ -319,10 +319,16 @@ export async function resolveMedia(
     // голосовое, фото, документ падали на скачивании.
     const root = (apiRoot?.trim() || TELEGRAM_API_ROOT).replace(/\/+$/, "");
     const url = `${root}/file/bot${token}/${filePath}`;
+    // Роутер живёт в частной сети (`http://10.0.1.20:8080`), и защита от SSRF
+    // резала скачивание как поход на внутренний адрес: голосовое терялось молча.
+    // Разрешаем ровно хост из apiRoot — его задал владелец конфига, а не
+    // сообщение; остальная частная сеть по-прежнему закрыта.
+    const ssrfPolicy = apiRoot?.trim() ? { allowedHostnames: [new URL(root).hostname] } : undefined;
     const fetched = await fetchRemoteMedia({
       url,
       fetchImpl,
       filePathHint: filePath,
+      ssrfPolicy,
     });
     const originalName = fetched.fileName ?? filePath;
     return saveMediaBuffer(fetched.buffer, fetched.contentType, "inbound", maxBytes, originalName);
