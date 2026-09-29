@@ -102,4 +102,19 @@ describe("ssrf pinning", () => {
       }),
     ).rejects.toThrow(/allowlist/i);
   });
+
+  // Так Telegram скачивает файлы через роутер: хост apiRoot разрешён по имени,
+  // соседние частные адреса — нет.
+  it("lets an explicitly allowed private IP through and nothing else", async () => {
+    const lookup = vi.fn(async (host: string) => [{ address: host, family: 4 }]);
+    const policy = { allowedHostnames: ["10.0.1.20"] };
+
+    await expect(
+      resolvePinnedHostnameWithPolicy("10.0.1.20", { lookupFn: lookup as never, policy }),
+    ).resolves.toMatchObject({ hostname: "10.0.1.20", addresses: ["10.0.1.20"] });
+
+    await expect(
+      resolvePinnedHostnameWithPolicy("10.0.1.40", { lookupFn: lookup as never, policy }),
+    ).rejects.toThrow(/private|internal/i);
+  });
 });
