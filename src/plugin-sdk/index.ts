@@ -441,3 +441,12 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+
+// Метки исходящих: шаг скилла едет к роутеру заголовком (CLT-056)
+export {
+  emitSkillToolCall,
+  onSkillToolCall,
+  setSessionOutboundTags,
+  type OutboundTags,
+  type SkillToolCall,
+} from "../infra/outbound-tags.js";

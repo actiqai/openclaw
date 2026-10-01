@@ -19,7 +19,9 @@ function registerCallSkill(gatewayBaseUrl: string): RegisteredTool {
   const tools: RegisteredTool[] = [];
   const api = {
     pluginConfig: { gatewayBaseUrl },
-    registerTool: (t: RegisteredTool) => tools.push(t),
+    // Тул регистрируется фабрикой (ей нужна сессия) — разворачиваем её, как агент.
+    registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
+      tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
     logger: { info: () => {} },
   };
 

@@ -43,6 +43,7 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { bindOutboundChat } from "../../infra/outbound-tags.js";
 import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
 import { resolveAgentOutboundIdentity } from "../../infra/outbound/identity.js";
 import { logWarn } from "../../logger.js";
@@ -579,6 +580,9 @@ export async function runCronIsolatedAgentTurn(params: {
               ? [{ text: synthesizedText }]
               : [];
         if (payloadsForDelivery.length > 0) {
+          // Ответ крона помечается шагом его собственного хода (CLT-056), а не
+          // последнего хода в чате: «как прошла тренировка?» — это `workout.4.1`.
+          bindOutboundChat(resolvedDelivery.to, agentSessionKey);
           const deliveryResults = await deliverOutboundPayloads({
             cfg: cfgWithAgentDefaults,
             channel: resolvedDelivery.channel,

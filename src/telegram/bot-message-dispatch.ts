@@ -21,6 +21,7 @@ import { createReplyPrefixOptions } from "../channels/reply-prefix.js";
 import { createTypingCallbacks } from "../channels/typing.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { danger, logVerbose } from "../globals.js";
+import { bindOutboundChat } from "../infra/outbound-tags.js";
 import { getAgentScopedMediaLocalRoots } from "../media/local-roots.js";
 import { deliverReplies } from "./bot/delivery.js";
 import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
@@ -84,6 +85,10 @@ export const dispatchTelegramMessage = async ({
     reactionApi,
     removeAckAfterReply,
   } = context;
+
+  // Ответы этого хода уйдут в этот чат: по связке `fetch` найдёт метку шага скилла,
+  // которую поставит ход (CLT-056).
+  bindOutboundChat(chatId, ctxPayload.SessionKey);
 
   const draftMaxChars = Math.min(textLimit, 4096);
   const accountBlockStreamingEnabled =

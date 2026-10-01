@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import { emitSkillToolCall } from "openclaw/plugin-sdk";
 
 const DEFAULT_GATEWAY_BASE_URL = "http://10.0.1.40:8082";
 
@@ -14,7 +15,7 @@ const skillProxyPlugin = {
     ).replace(/\/+$/, "");
     const today = new Date().toISOString().slice(0, 10);
 
-    api.registerTool({
+    const callSkillTool = {
       label: "Call Platform Skill",
       name: "call_skill",
       description:
@@ -64,6 +65,8 @@ const skillProxyPlugin = {
                 text: JSON.stringify({ status: "error", message: `Gateway unreachable: ${msg}` }),
               },
             ],
+            // Поле обязательно в контракте тула агента; структуры сверх JSON у нас нет.
+            details: null,
           };
         }
 
@@ -76,9 +79,24 @@ const skillProxyPlugin = {
               text: JSON.stringify(data, null, 2),
             },
           ],
+          details: null,
         };
       },
-    });
+    };
+
+    // Фабрика ради сессии: по вызову `skill-state` считает шаг скилла, который
+    // уедет к роутеру заголовком вместе с ответом (CLT-056).
+    api.registerTool(
+      (ctx: { sessionKey?: string }) => ({
+        ...callSkillTool,
+        execute: async (toolCallId: string, args: Record<string, unknown>) => {
+          const result = await callSkillTool.execute(toolCallId, args);
+          emitSkillToolCall(ctx.sessionKey, { tool: "call_skill", params: args, result });
+          return result;
+        },
+      }),
+      { name: "call_skill" },
+    );
 
     api.logger.info(`Skill proxy registered, gateway: ${gatewayBaseUrl}`);
   },
