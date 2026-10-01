@@ -2,6 +2,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { onSkillToolCall, setSessionOutboundTags } from "openclaw/plugin-sdk";
 import { RENDERED_BLOCKS, writeUserMd } from "./profile-view.js";
 import {
   callPayload,
@@ -15,6 +16,15 @@ import {
   type Profile,
   type SkillSchema,
 } from "./schema.js";
+import {
+  isReentry,
+  parseToolResult,
+  pickStep,
+  stepForCall,
+  type SkillCall,
+  type Step,
+  type TurnMemory,
+} from "./steps.js";
 import {
   activeFacts,
   appendHistory,
@@ -32,6 +42,7 @@ import {
   overdueDays,
   preferences,
   rateItem,
+  readJson,
   recentItems,
   readProfile,
   readShared,
@@ -44,6 +55,7 @@ import {
   savePending,
   todayISO,
   validateFact,
+  writeJsonAtomic,
   writeProfile,
   writeShared,
   weekAhead,
@@ -243,7 +255,95 @@ const skillStatePlugin = {
       };
     }
 
-    api.registerTool({
+    // ── Шаг скилла для роутера (CLT-056) ─────────────────────────────────────
+    //
+    // Вызовы за ход копятся по сессии; после каждого видимый шаг уезжает в метку
+    // исходящих, и ответ этого хода уходит в Telegram с заголовком
+    // `X-NikaAI-Step`. Память о прошлых ходах — в сторе: она нужна, чтобы
+    // отличить возврат к скиллу от продолжения, и обязана пережить рестарт.
+
+    const turnFile = join(stateDir, "turn.json");
+    const turns = new Map<string, { calls: SkillCall[]; steps: Step[]; reentry?: boolean }>();
+
+    function loadTurnMemory(): TurnMemory {
+      const memory = readJson<Partial<TurnMemory>>(turnFile, {});
+      return {
+        last: memory.last ?? null,
+        skills: memory.skills ?? {},
+        called: memory.called ?? {},
+      };
+    }
+
+    function track(sessionKey: string | undefined, call: SkillCall): void {
+      if (!sessionKey) return;
+
+      const turn = turns.get(sessionKey) ?? { calls: [], steps: [] };
+      turns.set(sessionKey, turn);
+
+      const skill = typeof call.params.skill === "string" ? call.params.skill : "";
+      const memory = loadTurnMemory();
+      const step = stepForCall(call, call.tool === "call_skill" && !memory.called[skill]);
+
+      turn.calls.push(call);
+      if (step) turn.steps.push(step);
+
+      const visible = pickStep(turn.steps, turn.calls);
+      if (!visible) return;
+
+      // Возврат считается от состояния до хода: память обновляется только в его
+      // конце, поэтому второй вызов того же хода не превратит возврат в продолжение.
+      if (turn.reentry === undefined) turn.reentry = isReentry(memory, visible.skill, Date.now());
+
+      setSessionOutboundTags(sessionKey, { step: visible.code, reentry: turn.reentry });
+    }
+
+    onSkillToolCall((sessionKey, call) => {
+      if (call.tool === "call_skill") track(sessionKey, call);
+    });
+
+    api.on?.("before_agent_start", (_event, ctx) => {
+      if (!ctx.sessionKey) return;
+      turns.delete(ctx.sessionKey);
+      // Ход без скилла не должен уйти с меткой прошлого хода.
+      setSessionOutboundTags(ctx.sessionKey, null);
+    });
+
+    api.on?.("agent_end", (_event, ctx) => {
+      const key = ctx.sessionKey;
+      if (!key) return;
+      const turn = turns.get(key);
+      const visible = turn ? pickStep(turn.steps, turn.calls) : null;
+      const touched =
+        visible?.skill ??
+        (turn?.calls.find((c) => typeof c.params.skill === "string")?.params.skill as
+          | string
+          | undefined);
+
+      // Молчаливый крон (`due_check` → `ask=false`) человеку ничего не писал — он
+      // не «прошлый ход», и разговор после него не должен считаться продолжением.
+      const isCron = key.includes("cron:");
+      if (isCron && !visible) return;
+
+      const memory = loadTurnMemory();
+      const now = Date.now();
+      memory.last = { skill: touched ?? null, at: now };
+      if (touched) memory.skills[touched] = now;
+      for (const call of turn?.calls ?? []) {
+        const skill = call.params.skill;
+        if (call.tool === "call_skill" && typeof skill === "string") {
+          const res = parseToolResult(call.result);
+          if (res.status !== "error") memory.called[skill] = true;
+        }
+      }
+
+      try {
+        writeJsonAtomic(turnFile, memory);
+      } catch (err) {
+        api.logger.warn?.(`skill-state: cannot save turn memory: ${String(err)}`);
+      }
+    });
+
+    const skillStateTool = {
       label: "Skill State",
       name: "skill_state",
       description:
@@ -673,7 +773,24 @@ const skillStatePlugin = {
             return fail(`unknown op "${op}"`);
         }
       },
-    });
+    };
+
+    // Фабрика, а не готовый тул: только так видна сессия, в которой его вызвали.
+    api.registerTool(
+      (ctx: { sessionKey?: string }) => ({
+        ...skillStateTool,
+        execute: async (toolCallId: string, args: Record<string, unknown>) => {
+          const result = await skillStateTool.execute(toolCallId, args);
+          try {
+            track(ctx.sessionKey, { tool: "skill_state", params: args, result });
+          } catch {
+            // метка не стоит сломанного ответа
+          }
+          return result;
+        },
+      }),
+      { name: "skill_state" },
+    );
 
     api.logger.info(`Skill state registered, store: ${stateDir}`);
   },

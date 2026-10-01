@@ -2,6 +2,11 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  emitSkillToolCall,
+  getSessionOutboundTags,
+  resetOutboundTagsForTests,
+} from "../../src/infra/outbound-tags.js";
 import skillStatePlugin from "./index.js";
 
 type RegisteredTool = {
@@ -82,7 +87,8 @@ beforeEach(() => {
   const tools: RegisteredTool[] = [];
   skillStatePlugin.register({
     pluginConfig: { stateDir: root, skillsDir, workspaceDir },
-    registerTool: (t: RegisteredTool) => tools.push(t),
+    registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
+      tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
     logger: { info: () => {} },
   } as never);
 
@@ -125,7 +131,8 @@ describe("stage — the thing the model cannot fake", () => {
     const tools: RegisteredTool[] = [];
     skillStatePlugin.register({
       pluginConfig: { stateDir: root, skillsDir, workspaceDir },
-      registerTool: (t: RegisteredTool) => tools.push(t),
+      registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
+        tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
       logger: { info: () => {} },
     } as never);
 
@@ -392,7 +399,8 @@ describe("check-ins — the bot chases the report, silently", () => {
     const tools: RegisteredTool[] = [];
     skillStatePlugin.register({
       pluginConfig: { stateDir: root, skillsDir, workspaceDir },
-      registerTool: (t: RegisteredTool) => tools.push(t),
+      registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
+        tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
       logger: { info: () => {} },
     } as never);
 
@@ -942,5 +950,85 @@ describe("USER.md follows the store", () => {
     await call({ op: "patch", skill: "profile-probe", patch: { goal: "похудеть" } });
 
     expect(existsSync(join(workspaceDir, "USER.md"))).toBe(false);
+  });
+});
+
+describe("step tag for the router (CLT-056)", () => {
+  const SESSION = "agent:main:main";
+  type Hook = (event: unknown, ctx: { sessionKey?: string }) => void;
+
+  let hooks: Record<string, Hook>;
+  let stateTool: RegisteredTool;
+
+  beforeEach(() => {
+    // Слушатели `call_skill` живут на globalThis: экземпляры плагина из других
+    // тестов иначе тоже ставили бы метку той же сессии.
+    resetOutboundTagsForTests();
+    hooks = {};
+    const tools: RegisteredTool[] = [];
+    skillStatePlugin.register({
+      pluginConfig: { stateDir: root, skillsDir, workspaceDir },
+      registerTool: (t: (ctx: { sessionKey?: string }) => RegisteredTool) =>
+        tools.push(t({ sessionKey: SESSION })),
+      on: (name: string, fn: Hook) => {
+        hooks[name] = fn;
+      },
+      logger: { info: () => {} },
+    } as never);
+    stateTool = tools.find((t) => t.name === "skill_state")!;
+  });
+
+  afterEach(() => {
+    resetOutboundTagsForTests();
+  });
+
+  const turn = async (body: () => Promise<unknown> | void) => {
+    hooks.before_agent_start({}, { sessionKey: SESSION });
+    await body();
+    const tags = getSessionOutboundTags(SESSION);
+    hooks.agent_end({}, { sessionKey: SESSION });
+    return tags;
+  };
+
+  const generate = () =>
+    emitSkillToolCall(SESSION, {
+      tool: "call_skill",
+      params: { skill: "workout-plan", action: "generate", params: {} },
+      result: { content: [{ type: "text", text: '{"status":"ok","workout":"..."}' }] },
+    });
+
+  it("tags the questionnaire step, clears it on a turn without a skill, marks the return", async () => {
+    const first = await turn(() => stateTool.execute("t", { op: "get", skill: "workout-plan" }));
+    expect(first).toEqual({ step: "workout.1.1", reentry: false });
+
+    const chat = await turn(() => {});
+    expect(chat).toBeUndefined();
+
+    const back = await turn(() => stateTool.execute("t", { op: "get", skill: "workout-plan" }));
+    expect(back).toEqual({ step: "workout.1.1", reentry: true });
+
+    const memory = JSON.parse(readFileSync(join(root, "turn.json"), "utf8"));
+    expect(memory.last.skill).toBe("workout-plan");
+  });
+
+  it("the first workout ever is workout.3.1, the next ones workout.3.2", async () => {
+    await stateTool.execute("t", {
+      op: "patch",
+      skill: "workout-plan",
+      patch: { goal: "lose", minutes: 30 },
+    });
+
+    expect((await turn(generate))?.step).toBe("workout.3.1");
+    expect((await turn(generate))?.step).toBe("workout.3.2");
+  });
+
+  it("a silent cron turn does not count as the previous turn", async () => {
+    await turn(() => stateTool.execute("t", { op: "get", skill: "workout-plan" }));
+
+    hooks.before_agent_start({}, { sessionKey: "agent:main:cron:report" });
+    hooks.agent_end({}, { sessionKey: "agent:main:cron:report" });
+
+    const next = await turn(() => stateTool.execute("t", { op: "get", skill: "workout-plan" }));
+    expect(next?.reentry).toBe(false);
   });
 });

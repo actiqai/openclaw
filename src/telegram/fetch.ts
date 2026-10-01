@@ -1,6 +1,7 @@
 import * as net from "node:net";
 import type { TelegramNetworkConfig } from "../config/types.telegram.js";
 import { resolveFetch } from "../infra/fetch.js";
+import { wrapFetchWithOutboundTags } from "../infra/outbound-tags.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveTelegramAutoSelectFamilyDecision } from "./network-config.js";
 
@@ -33,14 +34,17 @@ export function resolveTelegramFetch(
   options?: { network?: TelegramNetworkConfig },
 ): typeof fetch | undefined {
   applyTelegramNetworkWorkarounds(options?.network);
+  // Метка шага скилла едет заголовками на каждый `send*` (CLT-056): и ответ в
+  // чате, и отправка из крона идут через этот `fetch`, другого пути к Telegram нет.
   if (proxyFetch) {
-    return resolveFetch(proxyFetch);
+    const proxied = resolveFetch(proxyFetch);
+    return proxied ? wrapFetchWithOutboundTags(proxied) : proxied;
   }
   const fetchImpl = resolveFetch();
   if (!fetchImpl) {
     throw new Error("fetch is not available; set channels.telegram.proxy in config");
   }
-  return fetchImpl;
+  return wrapFetchWithOutboundTags(fetchImpl);
 }
 
 export function resetTelegramFetchStateForTests(): void {
