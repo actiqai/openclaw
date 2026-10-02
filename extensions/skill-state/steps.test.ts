@@ -134,12 +134,15 @@ const COVERED: Array<[string, SkillCall, boolean?]> = [
   ["travel.5.1", state("travelpayouts", { op: "history_append", event: { kind: "trip" } }, ok())],
 ];
 
-/** Шаги справочника, которые по одному вызову не определяются. */
+/**
+ * Шаги справочника, которые по одному вызову не определяются.
+ *
+ * `booking.3.2` («Фраза для звонка») из справочника убран (`CLT-057`, `ACT-117`):
+ * фразу пишет модель без вызова тула, и шаг не срабатывал ни разу.
+ */
 const NOT_FROM_A_CALL = [
   // Отказ от блюда второй раз — только вместе с заменой в том же ходу (pickStep).
   "meal.4.2",
-  // Фраза для звонка — ответ без вызова тула.
-  "booking.3.2",
 ];
 
 describe("step codes (CLT-056)", () => {
@@ -147,9 +150,9 @@ describe("step codes (CLT-056)", () => {
     expect(stepForCall(call, firstCall ?? false)?.code).toBe(code);
   });
 
-  it("covers the whole catalogue: 75 steps, each either from a call or listed as not", () => {
+  it("covers the whole catalogue: 74 steps, each either from a call or listed as not", () => {
     const all = new Set([...COVERED.map(([code]) => code), ...NOT_FROM_A_CALL]);
-    expect(all.size).toBe(75);
+    expect(all.size).toBe(74);
   });
 
   it("an error answer is not a step", () => {
@@ -174,6 +177,22 @@ describe("step codes (CLT-056)", () => {
   it("weight said during the questionnaire answers the question, it is not meal.7.1", () => {
     const answer = state("meal-plan", { op: "patch", patch: { weight_kg: 90 } }, asks("activity"));
     expect(stepForCall(answer)?.code).toBe("meal.1.5");
+  });
+
+  it("weight told to the workout skill is not meal.7.1 (CLT-057)", () => {
+    const weight = state(
+      "workout-plan",
+      { op: "patch", patch: { weight_kg: 82 } },
+      ok({ ready: true }),
+    );
+    expect(stepForCall(weight)).toBeNull();
+
+    const withQuestion = state(
+      "workout-plan",
+      { op: "patch", patch: { weight_kg: 82 } },
+      asks("remind", { ready: true }),
+    );
+    expect(stepForCall(withQuestion)?.code).toBe("workout.2.5");
   });
 });
 
