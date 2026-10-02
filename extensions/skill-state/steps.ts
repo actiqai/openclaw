@@ -165,9 +165,11 @@ function skillStateStep(
         if (short === "workout") return step("workout.7.1", skill, RANK.blocked);
       }
       // Пока анкета не собрана, записанный вес или дни — это ответ на вопрос,
-      // а следующий шаг — следующий вопрос.
+      // а следующий шаг — следующий вопрос. Вес — шаг только питания: в
+      // тренировках он просто поле профиля, и метка `meal.7.1` увела бы ответ
+      // про тренировки к гифке питания (`CLT-057`).
       if (res.ready === true) {
-        if (typeof patch.weight_kg === "number") return step("meal.7.1", skill, RANK.write);
+        if (short === "meal" && typeof patch.weight_kg === "number") return write("7.1");
         if (short === "workout" && Array.isArray(patch.days)) return write("5.3");
       }
       return questionStep(short, skill, res);
