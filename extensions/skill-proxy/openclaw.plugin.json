@@ -7,6 +7,14 @@
       "gatewayBaseUrl": {
         "type": "string",
         "description": "Base URL of actiq-gateway (e.g. http://10.0.1.40:8082)"
+      },
+      "instanceToken": {
+        "type": "string",
+        "description": "This instance's token: the gateway identifies the caller by it (X-Instance-Token)"
+      },
+      "stateDir": {
+        "type": "string",
+        "description": "Where sealed connection blobs are kept (inside the backed-up volume); they go to <stateDir>/connections"
       }
     }
   }

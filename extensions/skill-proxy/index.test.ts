@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import skillProxyPlugin from "./index.js";
 
@@ -15,10 +18,13 @@ type RegisteredTool = {
  * Registers the skill-proxy plugin against a fake plugin API and returns the
  * `call_skill` tool the OpenClaw agent would invoke.
  */
-function registerCallSkill(gatewayBaseUrl: string): RegisteredTool {
+function registerCallSkill(
+  gatewayBaseUrl: string,
+  extra: Record<string, string> = {},
+): RegisteredTool {
   const tools: RegisteredTool[] = [];
   const api = {
-    pluginConfig: { gatewayBaseUrl },
+    pluginConfig: { gatewayBaseUrl, ...extra },
     // Тул регистрируется фабрикой (ей нужна сессия) — разворачиваем её, как агент.
     registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
       tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
@@ -108,5 +114,60 @@ describe("skill-proxy — client layer of the webhook→reply flow", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("error");
     expect(payload.message).toContain("Gateway unreachable");
+  });
+
+  /**
+   * `CLT-059`. Подключения: блоб едет к гейтвею вместе с вызовом и токеном
+   * инстанса, новый блоб из ответа сохраняется, а модель блобов не видит.
+   */
+  it("carries sealed connections both ways and hides them from the model", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "skill-proxy-"));
+    mkdirSync(join(stateDir, "connections"));
+    writeFileSync(join(stateDir, "connections", "yandex-mail.blob"), "nk1.k1.mail");
+
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({
+        status: "ok",
+        result: { items: [] },
+        connections: { "yandex-disk": "nk1.k1.disk", "yandex-mail": "", "../evil": "x" },
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const callSkill = registerCallSkill("http://gateway.test:8082", {
+      instanceToken: "inst-token",
+      stateDir,
+    });
+
+    const result = await callSkill.execute("call-3", { skill: "yandex-disk", action: "list" });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["X-Instance-Token"]).toBe("inst-token");
+    expect(JSON.parse(init.body as string).connections).toEqual({ "yandex-mail": "nk1.k1.mail" });
+
+    // Новый блоб сохранён, стёртый — удалён, имя с выходом из каталога — проигнорировано.
+    expect(readFileSync(join(stateDir, "connections", "yandex-disk.blob"), "utf8")).toBe(
+      "nk1.k1.disk",
+    );
+    expect(existsSync(join(stateDir, "connections", "yandex-mail.blob"))).toBe(false);
+    expect(existsSync(join(stateDir, "evil.blob"))).toBe(false);
+
+    expect(result.content[0].text).not.toContain("nk1");
+    expect(JSON.parse(result.content[0].text).status).toBe("ok");
+  });
+
+  it("sends no connections field when there is nothing stored", async () => {
+    const fetchMock = vi.fn(async () => ({ json: async () => ({ status: "ok" }) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const callSkill = registerCallSkill("http://gateway.test:8082", {
+      stateDir: mkdtempSync(join(tmpdir(), "skill-proxy-")),
+    });
+
+    await callSkill.execute("call-4", { skill: "travelpayouts", action: "x" });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).connections).toBeUndefined();
+    expect((init.headers as Record<string, string>)["X-Instance-Token"]).toBeUndefined();
   });
 });

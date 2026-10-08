@@ -1,8 +1,83 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { emitSkillToolCall } from "openclaw/plugin-sdk";
 
 const DEFAULT_GATEWAY_BASE_URL = "http://10.0.1.40:8082";
+
+// Рядом с данными skill-state: этот каталог уезжает в бэкап (том `openclaw-state`).
+const DEFAULT_STATE_DIR = "/home/openclaw/.openclaw/actiq";
+
+// Имя поставщика становится именем файла — пускаем только то, что не выведет
+// из каталога.
+const PROVIDER = /^[a-z0-9-]{1,32}$/;
+
+/**
+ * Подключения человека к внешним сервисам (`CLT-059`, план
+ * `actiq/.ai/plans/connections.md`).
+ *
+ * Здесь лежат не токены, а блобы, запечатанные ключом гейтвея и привязанные к
+ * этому инстансу: распечатать их может только гейтвей. Расширение прикладывает
+ * их к каждому вызову скилла и сохраняет то, что гейтвей вернёт (новый блоб
+ * после входа или обновления токена; пустая строка — стереть). Модель блобов
+ * не видит: из ответа они вырезаются до того, как он станет выводом тула.
+ */
+export function readConnections(dir: string): Record<string, string> {
+  if (!existsSync(dir)) {
+    return {};
+  }
+
+  const out: Record<string, string> = {};
+
+  for (const file of readdirSync(dir)) {
+    const provider = file.endsWith(".blob") ? file.slice(0, -".blob".length) : "";
+
+    if (PROVIDER.test(provider)) {
+      const blob = readFileSync(join(dir, file), "utf8").trim();
+
+      if (blob) {
+        out[provider] = blob;
+      }
+    }
+  }
+
+  return out;
+}
+
+export function saveConnections(dir: string, updates: unknown): void {
+  if (!updates || typeof updates !== "object") {
+    return;
+  }
+
+  for (const [provider, blob] of Object.entries(updates as Record<string, unknown>)) {
+    if (!PROVIDER.test(provider) || typeof blob !== "string") {
+      continue;
+    }
+
+    const path = join(dir, `${provider}.blob`);
+
+    if (blob === "") {
+      rmSync(path, { force: true });
+      continue;
+    }
+
+    // Атомарно: оборванная запись оставила бы обрубок, и человеку пришлось бы
+    // подключаться заново.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tmp = `${path}.tmp.${process.pid}`;
+    writeFileSync(tmp, blob, { encoding: "utf8", mode: 0o600 });
+    renameSync(tmp, path);
+  }
+}
 
 const skillProxyPlugin = {
   id: "skill-proxy",
@@ -13,6 +88,13 @@ const skillProxyPlugin = {
     const gatewayBaseUrl = (
       (api.pluginConfig?.gatewayBaseUrl as string) || DEFAULT_GATEWAY_BASE_URL
     ).replace(/\/+$/, "");
+    // Токен инстанса — то, по чему гейтвей узнаёт, чей это вызов. Скиллам с
+    // подключением без него не открыть блоб; остальным он не мешает.
+    const instanceToken = (api.pluginConfig?.instanceToken as string) || "";
+    const connectionsDir = join(
+      (api.pluginConfig?.stateDir as string) || DEFAULT_STATE_DIR,
+      "connections",
+    );
     const today = new Date().toISOString().slice(0, 10);
 
     const callSkillTool = {
@@ -48,12 +130,32 @@ const skillProxyPlugin = {
         // Единая точка входа: адрес один на всю платформу, скилл едет в теле.
         const url = `${gatewayBaseUrl}/v1/skill`;
 
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        };
+        if (instanceToken) {
+          headers["X-Instance-Token"] = instanceToken;
+        }
+
+        let connections: Record<string, string> = {};
+        try {
+          connections = readConnections(connectionsDir);
+        } catch (err) {
+          api.logger.warn?.(`skill-proxy: cannot read connections: ${String(err)}`);
+        }
+
+        const body: Record<string, unknown> = { skill, action, params };
+        if (Object.keys(connections).length > 0) {
+          body.connections = connections;
+        }
+
         let response: Response;
         try {
           response = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ skill, action, params }),
+            headers,
+            body: JSON.stringify(body),
             signal: AbortSignal.timeout(30_000),
           });
         } catch (err) {
@@ -71,6 +173,16 @@ const skillProxyPlugin = {
         }
 
         const data = await response.json();
+
+        if (data && typeof data === "object" && "connections" in data) {
+          try {
+            saveConnections(connectionsDir, (data as Record<string, unknown>).connections);
+          } catch (err) {
+            api.logger.warn?.(`skill-proxy: cannot save connections: ${String(err)}`);
+          }
+          // Блоб модели ни к чему: в истории сессии он только занимал бы место.
+          delete (data as Record<string, unknown>).connections;
+        }
 
         return {
           content: [
