@@ -26,8 +26,12 @@ function registerCallSkill(
   const api = {
     pluginConfig: { gatewayBaseUrl, ...extra },
     // Тул регистрируется фабрикой (ей нужна сессия) — разворачиваем её, как агент.
-    registerTool: (t: RegisteredTool | ((ctx: { sessionKey?: string }) => RegisteredTool)) =>
-      tools.push(typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t),
+    // Тул регистрируется фабрикой (ей нужна сессия) — разворачиваем её, как агент;
+    // фабрика отдаёт список: общий `call_skill` и типизированные инструменты.
+    registerTool: (t: unknown) => {
+      const made = typeof t === "function" ? t({ sessionKey: "agent:main:main" }) : t;
+      tools.push(...(Array.isArray(made) ? made : [made]));
+    },
     logger: { info: () => {} },
   };
 
@@ -141,7 +145,11 @@ describe("skill-proxy — client layer of the webhook→reply flow", () => {
 
     const result = await callSkill.execute("call-3", { skill: "yandex-disk", action: "list" });
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // С токеном расширение ещё и спрашивает каталог инструментов — ищем вызов скилла.
+    const [, init] = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/v1/skill")) as [
+      string,
+      RequestInit,
+    ];
     expect((init.headers as Record<string, string>)["X-Instance-Token"]).toBe("inst-token");
     expect(JSON.parse(init.body as string).connections).toEqual({ "yandex-mail": "nk1.k1.mail" });
 

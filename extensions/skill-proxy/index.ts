@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { emitSkillToolCall } from "openclaw/plugin-sdk";
+import { createToolCatalog, typedTool } from "./typed-tools.js";
 
 const DEFAULT_GATEWAY_BASE_URL = "http://10.0.1.40:8082";
 
@@ -95,6 +96,88 @@ const skillProxyPlugin = {
       (api.pluginConfig?.stateDir as string) || DEFAULT_STATE_DIR,
       "connections",
     );
+    const stateDir = (api.pluginConfig?.stateDir as string) || DEFAULT_STATE_DIR;
+
+    /** Один вызов скилла на гейтвее — общий для `call_skill` и типизированных инструментов. */
+    const callGateway = async (skill: string, action: string, params: Record<string, unknown>) => {
+      // Единая точка входа: адрес один на всю платформу, скилл едет в теле.
+      const url = `${gatewayBaseUrl}/v1/skill`;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (instanceToken) {
+        headers["X-Instance-Token"] = instanceToken;
+      }
+
+      let connections: Record<string, string> = {};
+      try {
+        connections = readConnections(connectionsDir);
+      } catch (err) {
+        api.logger.warn?.(`skill-proxy: cannot read connections: ${String(err)}`);
+      }
+
+      const body: Record<string, unknown> = { skill, action, params };
+      if (Object.keys(connections).length > 0) {
+        body.connections = connections;
+      }
+
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ status: "error", message: `Gateway unreachable: ${msg}` }),
+            },
+          ],
+          // Поле обязательно в контракте тула агента; структуры сверх JSON у нас нет.
+          details: null,
+        };
+      }
+
+      const data = await response.json();
+
+      if (data && typeof data === "object" && "connections" in data) {
+        try {
+          saveConnections(connectionsDir, (data as Record<string, unknown>).connections);
+        } catch (err) {
+          api.logger.warn?.(`skill-proxy: cannot save connections: ${String(err)}`);
+        }
+        // Блоб модели ни к чему: в истории сессии он только занимал бы место.
+        delete (data as Record<string, unknown>).connections;
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(data, null, 2),
+          },
+        ],
+        details: null,
+      };
+    };
+
+    // Типизированные инструменты (`CLT-060`): описания приходят с гейтвея, лежат
+    // копией рядом с данными — после перезапуска без сети инструменты остаются.
+    const tools = createToolCatalog({
+      gatewayBaseUrl,
+      instanceToken,
+      cacheFile: join(stateDir, "skill-tools.json"),
+      logger: api.logger,
+    });
+    tools.start();
+
     const today = new Date().toISOString().slice(0, 10);
 
     const callSkillTool = {
@@ -122,93 +205,47 @@ const skillProxyPlugin = {
           }),
         ),
       }),
-      execute: async (_toolCallId: string, args: Record<string, unknown>) => {
-        const skill = args.skill as string;
-        const action = args.action as string;
-        const params = (args.params as Record<string, unknown>) ?? {};
-
-        // Единая точка входа: адрес один на всю платформу, скилл едет в теле.
-        const url = `${gatewayBaseUrl}/v1/skill`;
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        };
-        if (instanceToken) {
-          headers["X-Instance-Token"] = instanceToken;
-        }
-
-        let connections: Record<string, string> = {};
-        try {
-          connections = readConnections(connectionsDir);
-        } catch (err) {
-          api.logger.warn?.(`skill-proxy: cannot read connections: ${String(err)}`);
-        }
-
-        const body: Record<string, unknown> = { skill, action, params };
-        if (Object.keys(connections).length > 0) {
-          body.connections = connections;
-        }
-
-        let response: Response;
-        try {
-          response = await fetch(url, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(30_000),
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ status: "error", message: `Gateway unreachable: ${msg}` }),
-              },
-            ],
-            // Поле обязательно в контракте тула агента; структуры сверх JSON у нас нет.
-            details: null,
-          };
-        }
-
-        const data = await response.json();
-
-        if (data && typeof data === "object" && "connections" in data) {
-          try {
-            saveConnections(connectionsDir, (data as Record<string, unknown>).connections);
-          } catch (err) {
-            api.logger.warn?.(`skill-proxy: cannot save connections: ${String(err)}`);
-          }
-          // Блоб модели ни к чему: в истории сессии он только занимал бы место.
-          delete (data as Record<string, unknown>).connections;
-        }
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-          details: null,
-        };
-      },
+      execute: async (_toolCallId: string, args: Record<string, unknown>) =>
+        callGateway(
+          args.skill as string,
+          args.action as string,
+          (args.params as Record<string, unknown>) ?? {},
+        ),
     };
 
     // Фабрика ради сессии: по вызову `skill-state` считает шаг скилла, который
-    // уедет к роутеру заголовком вместе с ответом (CLT-056).
-    api.registerTool(
-      (ctx: { sessionKey?: string }) => ({
+    // уедет к роутеру заголовком вместе с ответом (CLT-056). Типизированный вызов
+    // сообщается так же, как `call_skill`: для шага важен скилл, а не инструмент.
+    api.registerTool((ctx: { sessionKey?: string }) => {
+      const generic = {
         ...callSkillTool,
         execute: async (toolCallId: string, args: Record<string, unknown>) => {
           const result = await callSkillTool.execute(toolCallId, args);
           emitSkillToolCall(ctx.sessionKey, { tool: "call_skill", params: args, result });
           return result;
         },
-      }),
-      { name: "call_skill" },
-    );
+      };
+
+      const typed = tools.current().map((spec) => {
+        const tool = typedTool(spec, callGateway);
+
+        return {
+          ...tool,
+          execute: async (toolCallId: string, args: Record<string, unknown>) => {
+            const result = await tool.execute(toolCallId, args);
+            const { action, ...params } = args;
+            emitSkillToolCall(ctx.sessionKey, {
+              tool: "call_skill",
+              params: { skill: spec.skill, action, params },
+              result,
+            });
+            return result;
+          },
+        };
+      });
+
+      return [generic, ...typed];
+    });
 
     api.logger.info(`Skill proxy registered, gateway: ${gatewayBaseUrl}`);
   },
