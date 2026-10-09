@@ -1032,3 +1032,33 @@ describe("step tag for the router (CLT-056)", () => {
     expect(next?.reentry).toBe(false);
   });
 });
+
+// actiq CLT-062: модель присылает вложенные значения строками. 09.10.2026
+// профиль тренировок не записывался — дни и минуты отвергались, а Ника
+// пересказывала человеку каждую попытку.
+describe("patch values sent as strings", () => {
+  it("stores a number sent as a string", async () => {
+    const res = await call({ op: "patch", skill: "workout-plan", patch: { minutes: "20" } });
+    expect(res.status).not.toBe("error");
+    const state = await call({ op: "get", skill: "workout-plan" });
+    expect(state.profile.minutes).toBe(20);
+  });
+
+  it("stores a list sent as a JSON string or as a comma-separated string", async () => {
+    await call({ op: "patch", skill: "workout-plan", patch: { days: '["tue","sat"]' } });
+    expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["tue", "sat"]);
+
+    await call({ op: "patch", skill: "workout-plan", patch: { days: "вт, сб" } });
+    expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["вт", "сб"]);
+
+    await call({ op: "patch", skill: "workout-plan", patch: { days: [2, 6] } });
+    expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["2", "6"]);
+  });
+
+  it("still refuses what has no single meaning, and asks to fix it silently", async () => {
+    const res = await call({ op: "patch", skill: "workout-plan", patch: { minutes: "двадцать" } });
+    expect(res.status).toBe("error");
+    expect(res.message).toMatch(/silently/);
+    expect(res.errors[0].field).toBe("minutes");
+  });
+});

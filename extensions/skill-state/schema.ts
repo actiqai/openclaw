@@ -49,6 +49,79 @@ export function isEmpty(value: unknown): boolean {
   return false;
 }
 
+/**
+ * Приводит значение к типу поля, если смысл однозначен (actiq CLT-062).
+ *
+ * `patch` объявлен как «произвольные значения», и модели присылают вложенные
+ * значения строками: `"20"` вместо 20, `"[\"tue\",\"sat\"]"` или `"вт, сб"`
+ * вместо списка. Проверка отвергала их, модель пробовала снова и снова — и
+ * рассказывала человеку о каждой попытке, а профиль тренировок так и не
+ * записывался (09.10.2026). Неоднозначное не трогаем: его отвергнет проверка, и
+ * модель получит понятную причину.
+ */
+export function coerceField(field: Field, value: unknown): unknown {
+  switch (field.type) {
+    case "int":
+    case "number": {
+      if (typeof value === "string" && /^\s*-?\d+([.,]\d+)?\s*$/.test(value)) {
+        return Number(value.trim().replace(",", "."));
+      }
+      return value;
+    }
+
+    case "bool": {
+      if (typeof value === "string") {
+        const v = value.trim().toLowerCase();
+        if (v === "true" || v === "да") return true;
+        if (v === "false" || v === "нет") return false;
+      }
+      return value;
+    }
+
+    case "string[]": {
+      if (Array.isArray(value)) {
+        return value.map((item) =>
+          typeof item === "number" || typeof item === "boolean" ? String(item) : item,
+        );
+      }
+      if (typeof value !== "string") return value;
+      const raw = value.trim();
+      if (raw === "") return [];
+      if (raw.startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (Array.isArray(parsed)) return coerceField(field, parsed);
+        } catch {
+          // не JSON — разберём как перечисление
+        }
+      }
+      return raw
+        .split(/[,;\n]/)
+        .map((item) => item.trim())
+        .filter((item) => item !== "");
+    }
+
+    case "string":
+    case "enum":
+    case "date":
+      return typeof value === "number" ? String(value) : value;
+  }
+
+  return value;
+}
+
+/** Приводит к типам схемы все известные поля патча; неизвестные — как есть. */
+export function coerceToSchema(schema: SkillSchema, patch: Profile): Profile {
+  const out: Profile = {};
+
+  for (const [name, value] of Object.entries(patch)) {
+    const field = schema.fields[name];
+    out[name] = field && value !== null && value !== undefined ? coerceField(field, value) : value;
+  }
+
+  return out;
+}
+
 export function validateField(name: string, field: Field, value: unknown): FieldError | null {
   const fail = (reason: string, message: string): FieldError => ({ field: name, reason, message });
 
