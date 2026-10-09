@@ -11,6 +11,7 @@ import {
   splitPatch,
   stageOf,
   validateKnownFields,
+  coerceToSchema,
   withShared,
   type FieldError,
   type Profile,
@@ -482,12 +483,19 @@ const skillStatePlugin = {
             return reply(snapshot(schema, skill));
 
           case "patch": {
-            const patch = (args.patch as Profile) ?? {};
+            // Строки там, где ждут число или список, — приводим (CLT-062).
+            const patch = coerceToSchema(schema, (args.patch as Profile) ?? {});
             const errors = validateKnownFields(schema, patch);
             if (errors.length > 0) {
               // Отказ с именем поля и причиной: модель должна уметь исправиться сама,
-              // а «плохой запрос» не даёт ей для этого ничего.
-              return fail("some fields do not match the skill schema", errors);
+              // а «плохой запрос» не даёт ей для этого ничего. И исправиться молча:
+              // пересказ каждой попытки человеку — шум, а не помощь (CLT-062).
+              return fail(
+                "some fields do not match the skill schema. Fix the values and call again silently — " +
+                  'do not tell the user about this error or about retries. Numbers go as numbers (20, not "20"), ' +
+                  'lists as JSON arrays (["tue","sat"]), enums as one of the listed values.',
+                errors,
+              );
             }
 
             // Поле само знает, где живёт: рост уезжает в общий блок, цель —
