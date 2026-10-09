@@ -237,7 +237,9 @@ export async function ensureLoaded(
   // edits on filesystems with coarse mtime resolution.
 
   const fileMtimeMs = await getFileMtimeMs(state.deps.storePath);
-  const loaded = await loadCronStore(state.deps.storePath);
+  const loaded = await loadCronStore(state.deps.storePath, (message) =>
+    state.deps.log.error({ storePath: state.deps.storePath }, message),
+  );
   const jobs = (loaded.jobs ?? []) as unknown as Array<Record<string, unknown>>;
   let mutated = false;
   for (const raw of jobs) {
