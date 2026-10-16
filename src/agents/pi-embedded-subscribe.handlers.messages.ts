@@ -206,6 +206,40 @@ export function handleMessageUpdate(
   }
 }
 
+/**
+ * Текст сообщения, за которым модель вызвала инструмент, — рассказ о работе, а не
+ * ответ (CLT-065). Раньше каждый такой кусок уходил человеку отдельным сообщением:
+ * «Запускаю скилл», «Хм, формат не тот. Попробую иначе». Теперь он остаётся в
+ * истории сессии, а в итоговый ответ не попадает.
+ *
+ * При потоковой отправке блоков (`onBlockReply`) текст уже ушёл — убирать поздно.
+ */
+function holdBackInterimTexts(
+  ctx: EmbeddedPiSubscribeContext,
+  message: AgentMessage,
+  messageTextStart: number,
+) {
+  if (ctx.params.onBlockReply) {
+    return;
+  }
+  const content = (message as { content?: unknown }).content;
+  const callsTool =
+    (message as { stopReason?: unknown }).stopReason === "toolUse" ||
+    (Array.isArray(content) &&
+      content.some(
+        (block) =>
+          Boolean(block) &&
+          typeof block === "object" &&
+          (block as { type?: unknown }).type === "toolCall",
+      ));
+  if (!callsTool || ctx.state.assistantTexts.length <= messageTextStart) {
+    return;
+  }
+  const held = ctx.state.assistantTexts.splice(messageTextStart);
+  ctx.state.interimTexts.push(...held);
+  ctx.state.assistantTextBaseline = ctx.state.assistantTexts.length;
+}
+
 export function handleMessageEnd(
   ctx: EmbeddedPiSubscribeContext,
   evt: AgentEvent & { message: AgentMessage },
@@ -278,9 +312,11 @@ export function handleMessageEnd(
     ctx.state.emittedAssistantUpdate = true;
   }
 
+  const messageTextStart = ctx.state.assistantTextBaseline;
   const addedDuringMessage = ctx.state.assistantTexts.length > ctx.state.assistantTextBaseline;
   const chunkerHasBuffered = ctx.blockChunker?.hasBuffered() ?? false;
   ctx.finalizeAssistantTexts({ text, addedDuringMessage, chunkerHasBuffered });
+  holdBackInterimTexts(ctx, assistantMessage, messageTextStart);
 
   const onBlockReply = ctx.params.onBlockReply;
   const shouldEmitReasoning = Boolean(

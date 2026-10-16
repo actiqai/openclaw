@@ -29,6 +29,13 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
   const lastAssistant = ctx.state.lastAssistant;
   const isError = isAssistantMessage(lastAssistant) && lastAssistant.stopReason === "error";
 
+  // Итогового текста нет, а по ходу модель что-то писала (CLT-065): лучше
+  // последний промежуточный текст, чем молчание.
+  const lastInterim = ctx.state.interimTexts.at(-1);
+  if (!isError && ctx.state.assistantTexts.length === 0 && lastInterim) {
+    ctx.state.assistantTexts.push(lastInterim);
+  }
+
   ctx.log.debug(`embedded run agent end: runId=${ctx.params.runId} isError=${isError}`);
 
   if (isError && lastAssistant) {

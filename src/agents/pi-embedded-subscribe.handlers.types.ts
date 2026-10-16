@@ -32,6 +32,12 @@ export type ToolCallSummary = {
 
 export type EmbeddedPiSubscribeState = {
   assistantTexts: string[];
+  /**
+   * Тексты сообщений модели, после которых она вызвала инструмент: «Запускаю
+   * скилл», «Хм, формат не тот…» (CLT-065). Человеку не уходят; последний —
+   * запасной ответ, если итогового текста в ходе так и не появилось.
+   */
+  interimTexts: string[];
   toolMetas: Array<{ toolName?: string; meta?: string }>;
   toolMetaById: Map<string, ToolCallSummary>;
   toolSummaryById: Set<string>;
