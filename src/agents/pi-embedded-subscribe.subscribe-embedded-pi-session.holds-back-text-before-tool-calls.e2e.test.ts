@@ -20,6 +20,9 @@ function subscribe() {
   const subscription = subscribeEmbeddedPiSession({
     session: session as unknown as Parameters<typeof subscribeEmbeddedPiSession>[0]["session"],
     runId: "run",
+    // Как в настоящем ходе: раннер передаёт обработчик всегда, даже когда
+    // потоковая отправка выключена и он ничего не шлёт (CLT-066).
+    onBlockReply: () => {},
   });
 
   const say = (text: string, opts: { callsTool: boolean }) => {
