@@ -212,16 +212,16 @@ export function handleMessageUpdate(
  * «Запускаю скилл», «Хм, формат не тот. Попробую иначе». Теперь он остаётся в
  * истории сессии, а в итоговый ответ не попадает.
  *
- * При потоковой отправке блоков (`onBlockReply`) текст уже ушёл — убирать поздно.
+ * `onBlockReply` передаётся всегда, даже при выключенной потоковой отправке, —
+ * тогда он ничего не шлёт, и текст доезжает только отсюда (CLT-066: проверка на
+ * него выключала всю правку). При включённой — блок уже ушёл, а повтор в итоге
+ * и так отсекается по `directlySentBlockKeys`; убрать его отсюда безвредно.
  */
 function holdBackInterimTexts(
   ctx: EmbeddedPiSubscribeContext,
   message: AgentMessage,
   messageTextStart: number,
 ) {
-  if (ctx.params.onBlockReply) {
-    return;
-  }
   const content = (message as { content?: unknown }).content;
   const callsTool =
     (message as { stopReason?: unknown }).stopReason === "toolUse" ||
