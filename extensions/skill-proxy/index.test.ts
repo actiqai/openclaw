@@ -117,7 +117,11 @@ describe("skill-proxy — client layer of the webhook→reply flow", () => {
 
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe("error");
-    expect(payload.message).toContain("Gateway unreachable");
+    // CLT-068: модель получает указание, что сказать человеку, а не «Gateway
+    // unreachable», которое пересказывала как «гейтвей не отвечает».
+    expect(payload.message).toContain("did not answer");
+    expect(payload.message).toContain("no technical details");
+    expect(payload.message).toContain("ECONNREFUSED");
   });
 
   /**
