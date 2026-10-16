@@ -46,7 +46,6 @@ import {
   buildInboundUserContextPrefix,
 } from "./inbound-meta.js";
 import { resolveQueueSettings } from "./queue.js";
-import { routeReply } from "./route-reply.js";
 import { BARE_SESSION_RESET_PROMPT } from "./session-reset-prompt.js";
 import { ensureSkillSnapshot, prependSystemEvents } from "./session-updates.js";
 import { resolveTypingMode } from "./typing-mode.js";
@@ -139,11 +138,9 @@ export async function runPreparedReply(
     perMessageQueueOptions,
     typing,
     opts,
-    defaultProvider,
     defaultModel,
     timeoutMs,
     isNewSession,
-    resetTriggered,
     systemSent,
     sessionKey,
     sessionId,
@@ -328,28 +325,9 @@ export async function runPreparedReply(
       }
     }
   }
-  if (resetTriggered && command.isAuthorizedSender) {
-    // oxlint-disable-next-line typescript/no-explicit-any
-    const channel = ctx.OriginatingChannel || (command.channel as any);
-    const to = ctx.OriginatingTo || command.from || command.to;
-    if (channel && to) {
-      const modelLabel = `${provider}/${model}`;
-      const defaultLabel = `${defaultProvider}/${defaultModel}`;
-      const text =
-        modelLabel === defaultLabel
-          ? `✅ New session started · model: ${modelLabel}`
-          : `✅ New session started · model: ${modelLabel} (default: ${defaultLabel})`;
-      await routeReply({
-        payload: { text },
-        channel,
-        to,
-        sessionKey,
-        accountId: ctx.AccountId,
-        threadId: ctx.MessageThreadId,
-        cfg,
-      });
-    }
-  }
+  // «✅ New session started · model: actiq-gateway/claude-haiku-…» на /new не
+  // шлём (CLT-067): человеку это служебщина, к тому же с внутренним именем модели,
+  // а Ника и так здоровается следом.
   const sessionIdFinal = sessionId ?? crypto.randomUUID();
   const sessionFile = resolveSessionFilePath(
     sessionIdFinal,
