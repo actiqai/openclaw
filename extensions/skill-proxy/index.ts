@@ -13,6 +13,13 @@ import { join } from "node:path";
 import { emitSkillToolCall } from "openclaw/plugin-sdk";
 import { createToolCatalog, typedTool } from "./typed-tools.js";
 
+/**
+ * Сколько ждать навык (CLT-068). Было 30 с: меню на неделю гейтвей пишет моделью
+ * дольше, инстанс обрывал вызов, и человек получал сбой вместо меню (NIKAAI-6,
+ * 16.10.2026). Гейтвей сам ждёт модель до 90 с — здесь с запасом сверху.
+ */
+const SKILL_CALL_TIMEOUT_MS = 120_000;
+
 const DEFAULT_GATEWAY_BASE_URL = "http://10.0.1.40:8082";
 
 // Рядом с данными skill-state: этот каталог уезжает в бэкап (том `openclaw-state`).
@@ -129,7 +136,7 @@ const skillProxyPlugin = {
           method: "POST",
           headers,
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(30_000),
+          signal: AbortSignal.timeout(SKILL_CALL_TIMEOUT_MS),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -137,7 +144,15 @@ const skillProxyPlugin = {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ status: "error", message: `Gateway unreachable: ${msg}` }),
+              // Текст для модели, а не для человека: раньше здесь было «Gateway
+              // unreachable», и Ника пересказывала это как «гейтвей не отвечает».
+              text: JSON.stringify({
+                status: "error",
+                message:
+                  "The skill did not answer. Tell the person in one short sentence that it did not " +
+                  "work this time and offer to try again — no technical details, no gateway. " +
+                  `(internal: ${msg})`,
+              }),
             },
           ],
           // Поле обязательно в контракте тула агента; структуры сверх JSON у нас нет.
