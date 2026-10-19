@@ -78,12 +78,15 @@ export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
   const messageId = safeTrim(ctx.MessageSid);
   const messageIdFull = safeTrim(ctx.MessageSidFull);
   const historyCount = Array.isArray(ctx.InboundHistory) ? ctx.InboundHistory.length : 0;
+  const sent = formatSentAt(ctx.Timestamp);
 
   const payload = {
     schema: "openclaw.inbound_turn.v1",
     message_id: messageId,
     message_id_full: messageIdFull && messageIdFull !== messageId ? messageIdFull : undefined,
     reply_to_id: safeTrim(ctx.ReplyToId),
+    sent_at: sent?.at,
+    sent_weekday: sent?.weekday,
     flags: {
       was_mentioned: ctx.WasMentioned === true ? true : undefined,
       has_reply_context: Boolean(ctx.ReplyToBody),
@@ -94,6 +97,7 @@ export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
   };
 
   const hasAnything =
+    sent ||
     messageId ||
     payload.reply_to_id ||
     payload.flags.was_mentioned ||
@@ -112,6 +116,50 @@ export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
     JSON.stringify(payload, null, 2),
     "```",
   ].join("\n");
+}
+
+/**
+ * Пояс, в котором модель видит время сообщения (`CLT-070`).
+ *
+ * Московский — потому что так по умолчанию считает и Ника, пока человек не назвал
+ * свой. Смещение в строке всё равно делает момент однозначным.
+ */
+const SENT_AT_TIME_ZONE = "Europe/Moscow";
+
+/**
+ * Время сообщения — `2026-10-19T12:25:19+03:00` и день недели.
+ *
+ * Без него модель не знала, какое сегодня число: время жило в конверте системного
+ * промпта, а оттуда его унесли ради кэша (см. выше), и «напомни в 11:30» уехало на
+ * позавчера. Здесь оно кэшу не вредит — это время именно этого сообщения, оно
+ * хранится вместе с ним и между ходами не меняется.
+ */
+function formatSentAt(timestamp: number | undefined): { at: string; weekday: string } | undefined {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return undefined;
+  }
+  const date = new Date(timestamp);
+  const parts: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat("en-US", {
+    timeZone: SENT_AT_TIME_ZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).formatToParts(date)) {
+    parts[part.type] = part.value;
+  }
+  // «GMT+03:00»; у нулевого смещения — просто «GMT».
+  const offset = (parts.timeZoneName ?? "").replace("GMT", "") || "+00:00";
+  return {
+    at: `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`,
+    weekday: parts.weekday ?? "",
+  };
 }
 
 export function buildInboundUserContextPrefix(ctx: TemplateContext): string {

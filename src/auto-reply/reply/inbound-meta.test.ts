@@ -85,6 +85,39 @@ describe("buildInboundMetaTurnBlock", () => {
     expect(payload["message_id_full"]).toBe("full-provider-message-id");
   });
 
+  // `CLT-070`: без времени сообщения модель не знала, какое сегодня число, и ставила
+  // напоминание на позавчера.
+  it("carries when the message was sent, in Moscow time with the offset", () => {
+    const payload = parseInboundMetaPayload(
+      buildInboundMetaTurnBlock({
+        ...CTX,
+        Timestamp: Date.parse("2026-10-19T09:25:19Z"),
+      } as TemplateContext),
+    );
+
+    expect(payload["sent_at"]).toBe("2026-10-19T12:25:19+03:00");
+    expect(payload["sent_weekday"]).toBe("Monday");
+  });
+
+  it("dates a late-evening UTC message by the Moscow day", () => {
+    const payload = parseInboundMetaPayload(
+      buildInboundMetaTurnBlock({
+        ...CTX,
+        Timestamp: Date.parse("2026-10-18T22:30:00Z"),
+      } as TemplateContext),
+    );
+
+    expect(payload["sent_at"]).toBe("2026-10-19T01:30:00+03:00");
+    expect(payload["sent_weekday"]).toBe("Monday");
+  });
+
+  it("omits the time when the channel gave none", () => {
+    const payload = parseInboundMetaPayload(buildInboundMetaTurnBlock(CTX));
+
+    expect(payload["sent_at"]).toBeUndefined();
+    expect(payload["sent_weekday"]).toBeUndefined();
+  });
+
   // Пустой конверт не печатается: лишний блок стоит токенов в каждом ходе, а сказать
   // ему нечего.
   it("prints nothing when there is nothing to say", () => {
