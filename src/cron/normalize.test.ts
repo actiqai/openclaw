@@ -311,6 +311,21 @@ describe("normalizeCronJobCreate", () => {
     expect(delivery.mode).toBeUndefined();
     expect(delivery.to).toBe("123");
   });
+
+  // `CLT-071`: модель передаёт id чата числом.
+  it("accepts a numeric chat id as the delivery target", () => {
+    const normalized = normalizeCronJobCreate({
+      name: "numeric to",
+      schedule: { kind: "at", at: "2026-10-19T16:49:44+03:00" },
+      sessionTarget: "isolated",
+      payload: { kind: "agentTurn", message: "hello" },
+      delivery: { mode: "announce", channel: "telegram", to: 235280030 },
+    }) as unknown as Record<string, unknown>;
+
+    const delivery = normalized.delivery as Record<string, unknown>;
+    expect(delivery.mode).toBe("announce");
+    expect(delivery.to).toBe("235280030");
+  });
 });
 
 describe("normalizeCronJobPatch", () => {
