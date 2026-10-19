@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { TemplateContext } from "../templating.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { resolveSenderLabel } from "../../channels/sender-label.js";
@@ -74,11 +76,14 @@ export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
  * печатается вовсе — сообщение без идентификатора и без контекста ответа не нуждается
  * в конверте, а лишний блок в каждом ходе стоит токенов.
  */
-export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
+export function buildInboundMetaTurnBlock(
+  ctx: TemplateContext,
+  opts?: { timeZone?: string },
+): string {
   const messageId = safeTrim(ctx.MessageSid);
   const messageIdFull = safeTrim(ctx.MessageSidFull);
   const historyCount = Array.isArray(ctx.InboundHistory) ? ctx.InboundHistory.length : 0;
-  const sent = formatSentAt(ctx.Timestamp);
+  const sent = formatSentAt(ctx.Timestamp, opts?.timeZone);
 
   const payload = {
     schema: "openclaw.inbound_turn.v1",
@@ -87,6 +92,7 @@ export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
     reply_to_id: safeTrim(ctx.ReplyToId),
     sent_at: sent?.at,
     sent_weekday: sent?.weekday,
+    sent_tz: sent?.timeZone,
     flags: {
       was_mentioned: ctx.WasMentioned === true ? true : undefined,
       has_reply_context: Boolean(ctx.ReplyToBody),
@@ -119,29 +125,64 @@ export function buildInboundMetaTurnBlock(ctx: TemplateContext): string {
 }
 
 /**
- * Пояс, в котором модель видит время сообщения (`CLT-070`).
- *
- * Московский — потому что так по умолчанию считает и Ника, пока человек не назвал
- * свой. Смещение в строке всё равно делает момент однозначным.
+ * Пояс по умолчанию — московский: так считает и Ника, пока человек не назвал свой
+ * (`CLT-070`).
  */
-const SENT_AT_TIME_ZONE = "Europe/Moscow";
+export const DEFAULT_SENT_TIME_ZONE = "Europe/Moscow";
+
+/** Файл в рабочей папке агента с поясом человека: одна строка, `Europe/Belgrade`. */
+export const TIME_ZONE_FILENAME = "timezone";
 
 /**
- * Время сообщения — `2026-10-19T12:25:19+03:00` и день недели.
+ * Пояс человека из `<workspace>/timezone`, иначе московский (`CLT-072`).
+ *
+ * Время сообщения было московским, а пояс человека жил строчкой в `MEMORY.md`, и
+ * перевести одно в другое модель (Haiku) не смогла дважды подряд, даже с примером:
+ * человеку из Белграда называла время по Москве. Теперь время приходит сразу в его
+ * поясе — пересказать его буквально она умеет. Нечитаемое или неизвестное `Intl`
+ * имя — московский: лучше привычная ошибка на час, чем пропавшее время.
+ */
+export async function readTurnTimeZone(workspaceDir: string | undefined): Promise<string> {
+  if (!workspaceDir) {
+    return DEFAULT_SENT_TIME_ZONE;
+  }
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(workspaceDir, TIME_ZONE_FILENAME), "utf8");
+  } catch {
+    return DEFAULT_SENT_TIME_ZONE;
+  }
+  const name = raw.trim().split(/\s+/)[0] ?? "";
+  if (!name) {
+    return DEFAULT_SENT_TIME_ZONE;
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name });
+    return name;
+  } catch {
+    return DEFAULT_SENT_TIME_ZONE;
+  }
+}
+
+/**
+ * Время сообщения — `2026-10-19T12:25:19+03:00`, день недели и пояс.
  *
  * Без него модель не знала, какое сегодня число: время жило в конверте системного
  * промпта, а оттуда его унесли ради кэша (см. выше), и «напомни в 11:30» уехало на
  * позавчера. Здесь оно кэшу не вредит — это время именно этого сообщения, оно
  * хранится вместе с ним и между ходами не меняется.
  */
-function formatSentAt(timestamp: number | undefined): { at: string; weekday: string } | undefined {
+function formatSentAt(
+  timestamp: number | undefined,
+  timeZone: string = DEFAULT_SENT_TIME_ZONE,
+): { at: string; weekday: string; timeZone: string } | undefined {
   if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) {
     return undefined;
   }
   const date = new Date(timestamp);
   const parts: Record<string, string> = {};
   for (const part of new Intl.DateTimeFormat("en-US", {
-    timeZone: SENT_AT_TIME_ZONE,
+    timeZone,
     weekday: "long",
     year: "numeric",
     month: "2-digit",
@@ -159,6 +200,7 @@ function formatSentAt(timestamp: number | undefined): { at: string; weekday: str
   return {
     at: `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`,
     weekday: parts.weekday ?? "",
+    timeZone,
   };
 }
 

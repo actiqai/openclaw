@@ -57,6 +57,7 @@ vi.mock("./inbound-meta.js", () => ({
   buildInboundMetaSystemPrompt: vi.fn().mockReturnValue(""),
   buildInboundMetaTurnBlock: vi.fn().mockReturnValue(""),
   buildInboundUserContextPrefix: vi.fn().mockReturnValue(""),
+  readTurnTimeZone: vi.fn().mockResolvedValue("Europe/Moscow"),
 }));
 
 vi.mock("./queue.js", () => ({

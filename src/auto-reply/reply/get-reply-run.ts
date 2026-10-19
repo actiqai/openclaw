@@ -44,6 +44,7 @@ import {
   buildInboundMetaSystemPrompt,
   buildInboundMetaTurnBlock,
   buildInboundUserContextPrefix,
+  readTurnTimeZone,
 } from "./inbound-meta.js";
 import { resolveQueueSettings } from "./queue.js";
 import { BARE_SESSION_RESET_PROMPT } from "./session-reset-prompt.js";
@@ -224,6 +225,7 @@ export async function runPreparedReply(
   // См. buildInboundMetaTurnBlock.
   const inboundTurnMeta = buildInboundMetaTurnBlock(
     isNewSession ? sessionCtx : { ...sessionCtx, ThreadStarterBody: undefined },
+    { timeZone: await readTurnTimeZone(workspaceDir) },
   );
   const baseBodyForPrompt = isBareSessionReset
     ? baseBodyFinal
