@@ -167,7 +167,12 @@ function coerceDelivery(delivery: UnknownRecord) {
       delete next.channel;
     }
   }
-  if (typeof delivery.to === "string") {
+  // `CLT-071`: id чата Telegram модель берёт из метаданных числом — `"to": 235280030`,
+  // а схема ждёт строку и отвергает задание целиком. Девять повторов подряд с тем
+  // же числом: ошибку схемы модель не читает. Число — тот же адресат, строкой.
+  if (typeof delivery.to === "number" && Number.isSafeInteger(delivery.to)) {
+    next.to = String(delivery.to);
+  } else if (typeof delivery.to === "string") {
     const trimmed = delivery.to.trim();
     if (trimmed) {
       next.to = trimmed;
