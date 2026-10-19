@@ -1,9 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { TemplateContext } from "../templating.js";
 import {
   buildInboundMetaSystemPrompt,
   buildInboundMetaTurnBlock,
   buildInboundUserContextPrefix,
+  readTurnTimeZone,
 } from "./inbound-meta.js";
 
 function parseInboundMetaPayload(text: string): Record<string, unknown> {
@@ -111,6 +115,41 @@ describe("buildInboundMetaTurnBlock", () => {
     expect(payload["sent_weekday"]).toBe("Monday");
   });
 
+  // `CLT-072`: человеку из Белграда время — сразу по Белграду, переводить модели нечего.
+  it("tells the time in the person's own zone, and names the zone", () => {
+    const payload = parseInboundMetaPayload(
+      buildInboundMetaTurnBlock(
+        { ...CTX, Timestamp: Date.parse("2026-10-19T14:24:19Z") } as TemplateContext,
+        { timeZone: "Europe/Belgrade" },
+      ),
+    );
+
+    expect(payload["sent_at"]).toBe("2026-10-19T16:24:19+02:00");
+    expect(payload["sent_tz"]).toBe("Europe/Belgrade");
+  });
+
+  it("follows the zone's own clock change", () => {
+    const payload = parseInboundMetaPayload(
+      buildInboundMetaTurnBlock(
+        { ...CTX, Timestamp: Date.parse("2026-10-26T09:00:00Z") } as TemplateContext,
+        { timeZone: "Europe/Belgrade" },
+      ),
+    );
+
+    expect(payload["sent_at"]).toBe("2026-10-26T10:00:00+01:00");
+  });
+
+  it("names Moscow when no zone is given", () => {
+    const payload = parseInboundMetaPayload(
+      buildInboundMetaTurnBlock({
+        ...CTX,
+        Timestamp: Date.parse("2026-10-19T09:25:19Z"),
+      } as TemplateContext),
+    );
+
+    expect(payload["sent_tz"]).toBe("Europe/Moscow");
+  });
+
   it("omits the time when the channel gave none", () => {
     const payload = parseInboundMetaPayload(buildInboundMetaTurnBlock(CTX));
 
@@ -143,5 +182,30 @@ describe("buildInboundUserContextPrefix", () => {
 
     expect(text).toContain("Conversation info (untrusted metadata):");
     expect(text).toContain('"conversation_label": "ops-room"');
+  });
+});
+
+describe("readTurnTimeZone", () => {
+  async function workspaceWith(content?: string): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "turn-tz-"));
+    if (content !== undefined) {
+      await fs.writeFile(path.join(dir, "timezone"), content);
+    }
+    return dir;
+  }
+
+  it("reads the zone the agent wrote down", async () => {
+    expect(await readTurnTimeZone(await workspaceWith("Europe/Belgrade\n"))).toBe(
+      "Europe/Belgrade",
+    );
+  });
+
+  it("falls back to Moscow without the file", async () => {
+    expect(await readTurnTimeZone(await workspaceWith())).toBe("Europe/Moscow");
+    expect(await readTurnTimeZone(undefined)).toBe("Europe/Moscow");
+  });
+
+  it("falls back to Moscow on a name Intl does not know", async () => {
+    expect(await readTurnTimeZone(await workspaceWith("Белград, +2"))).toBe("Europe/Moscow");
   });
 });
