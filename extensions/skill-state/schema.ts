@@ -81,7 +81,11 @@ export function coerceField(field: Field, value: unknown): unknown {
     case "string[]": {
       if (Array.isArray(value)) {
         return value.map((item) =>
-          typeof item === "number" || typeof item === "boolean" ? String(item) : item,
+          typeof item === "number" || typeof item === "boolean"
+            ? String(item)
+            : typeof item === "string"
+              ? item.trim()
+              : item,
         );
       }
       if (typeof value !== "string") return value;
@@ -117,9 +121,181 @@ export function coerceToSchema(schema: SkillSchema, patch: Profile): Profile {
   for (const [name, value] of Object.entries(patch)) {
     const field = schema.fields[name];
     out[name] = field && value !== null && value !== undefined ? coerceField(field, value) : value;
+    if (name === "days" && field?.type === "string[]") out[name] = coerceWeekdays(out[name]);
   }
 
   return out;
+}
+
+/**
+ * Дни недели так, как их понимает расписание (`weekAhead` берёт первые три буквы
+ * и ищет среди них).
+ */
+export const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+/**
+ * Приводит дни тренировок к кодам `mon`…`sun` (actiq CLT-074).
+ *
+ * «Вт, сб» после CLT-062 записывалось списком `["Вт", "сб"]`, а «в любой день» —
+ * как есть, и расписание, понимающее только `mon`…`sun`, выходило пустым: ни
+ * одного напоминания. Правила — буква в букву те же, что `CoerceWeekdays` в
+ * гейтвее (GTW-069): гейтвей и инстанс, понимающие день по-разному, хуже, чем
+ * не понимающие вовсе. Что не разобрать («по настроению»), остаётся как было.
+ */
+export function coerceWeekdays(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+
+  const picked = new Set<string>();
+  const unknown: unknown[] = [];
+
+  for (const item of value) {
+    if (typeof item !== "string") {
+      unknown.push(item);
+      continue;
+    }
+
+    const days = weekdaysIn(item);
+    if (!days) {
+      unknown.push(item);
+      continue;
+    }
+
+    for (const day of days) picked.add(day);
+  }
+
+  return [...WEEKDAYS.filter((day) => picked.has(day)), ...unknown];
+}
+
+const WORKDAYS = WEEKDAYS.slice(0, 5);
+const WEEKEND = WEEKDAYS.slice(5);
+
+/**
+ * Ответы целиком, а не отдельные дни. Предлоги и «недели» в конце уже отрезаны.
+ * `Map`, а не объект: фраза «constructor» не должна находить метод прототипа.
+ */
+const WEEKDAY_PHRASES = new Map<string, string[]>([
+  ["каждый день", WEEKDAYS],
+  ["любой день", WEEKDAYS],
+  ["любые дни", WEEKDAYS],
+  ["все дни", WEEKDAYS],
+  ["всю", WEEKDAYS],
+  ["ежедневно", WEEKDAYS],
+  ["every day", WEEKDAYS],
+  ["everyday", WEEKDAYS],
+  ["daily", WEEKDAYS],
+  ["any day", WEEKDAYS],
+  ["будни", WORKDAYS],
+  ["будням", WORKDAYS],
+  ["рабочие дни", WORKDAYS],
+  ["weekdays", WORKDAYS],
+  ["выходные", WEEKEND],
+  ["выходным", WEEKEND],
+  ["weekend", WEEKEND],
+  ["weekends", WEEKEND],
+  ["выходные дни", WEEKEND],
+  ["рабочим дням", WORKDAYS],
+]);
+
+/** Обрезает символы `chars` с обоих концов, как `strings.Trim` в Go. */
+function trimChars(text: string, chars: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && chars.includes(text[start])) start += 1;
+  while (end > start && chars.includes(text[end - 1])) end -= 1;
+  return text.slice(start, end);
+}
+
+/**
+ * Разбирает одно значение: фразу («по будням»), день («вторник», «Вт», «tue»),
+ * диапазон («пн-пт») или дни через «и» / пробел («вт и сб»). Не разобралось
+ * целиком — null.
+ */
+function weekdaysIn(text: string): string[] | null {
+  let phrase = trimChars(text.trim().toLowerCase(), ".!?").replaceAll("ё", "е");
+
+  for (const prefix of ["в ", "во ", "по ", "on "]) {
+    if (phrase.startsWith(prefix)) phrase = phrase.slice(prefix.length);
+  }
+  for (const suffix of [" недели", " неделю"]) {
+    if (phrase.endsWith(suffix)) phrase = phrase.slice(0, -suffix.length);
+  }
+
+  const known = WEEKDAY_PHRASES.get(phrase);
+  if (known) return known;
+
+  // «с понедельника по пятницу»
+  if (phrase.startsWith("с ")) {
+    const rest = phrase.slice(2);
+    const at = rest.indexOf(" по ");
+    if (at >= 0) return weekdayRange(rest.slice(0, at).trim(), rest.slice(at + 4).trim());
+  }
+
+  for (const dash of ["-", "–", "—"]) {
+    const at = phrase.indexOf(dash);
+    if (at >= 0) return weekdayRange(phrase.slice(0, at).trim(), phrase.slice(at + 1).trim());
+  }
+
+  const days: string[] = [];
+  for (const word of phrase.split(/[ /]/)) {
+    if (word === "" || ["и", "в", "во", "по", "and"].includes(word)) continue;
+
+    const day = weekday(word);
+    if (!day) return null;
+    days.push(day);
+  }
+
+  return days.length > 0 ? days : null;
+}
+
+function weekdayRange(from: string, to: string): string[] | null {
+  const start = WEEKDAYS.indexOf(weekday(from));
+  const end = WEEKDAYS.indexOf(weekday(to));
+  if (start < 0 || end < 0) return null;
+
+  const days: string[] = [];
+  for (let i = start; ; i = (i + 1) % 7) {
+    days.push(WEEKDAYS[i]);
+    if (i === end) return days;
+  }
+}
+
+/** Начало слова, по которому день узнаётся в любом падеже: «среда», «среду», «средам». */
+const WEEKDAY_STEMS: Array<[string, string]> = [
+  ["пон", "mon"],
+  ["вто", "tue"],
+  ["сре", "wed"],
+  ["чет", "thu"],
+  ["пят", "fri"],
+  ["суб", "sat"],
+  ["вос", "sun"],
+  ["mon", "mon"],
+  ["tue", "tue"],
+  ["wed", "wed"],
+  ["thu", "thu"],
+  ["fri", "fri"],
+  ["sat", "sat"],
+  ["sun", "sun"],
+];
+
+const WEEKDAY_SHORT = new Map([
+  ["пн", "mon"],
+  ["вт", "tue"],
+  ["ср", "wed"],
+  ["чт", "thu"],
+  ["пт", "fri"],
+  ["сб", "sat"],
+  ["вс", "sun"],
+]);
+
+function weekday(word: string): string {
+  const short = WEEKDAY_SHORT.get(word);
+  if (short) return short;
+
+  for (const [stem, day] of WEEKDAY_STEMS) {
+    if (word.startsWith(stem)) return day;
+  }
+
+  return "";
 }
 
 export function validateField(name: string, field: Field, value: unknown): FieldError | null {

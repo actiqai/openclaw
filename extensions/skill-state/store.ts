@@ -110,6 +110,68 @@ export function writeShared(root: string, name: string, value: Record<string, un
   writeJsonAtomic(join(root, "shared", `${name}.json`), value);
 }
 
+/**
+ * Приводит поля факта к их типам (actiq CLT-074).
+ *
+ * 22.10.2026 меню на неделю пять раз подряд отвергалось гейтвеем с `facts:
+ * expected a list of facts`: факт был записан здесь, как прислала модель, —
+ * `affects` строкой, `id` числом, — и уезжал наверх в каждом `call_payload`.
+ * Правила те же, что `CoerceFacts` в гейтвее (GTW-068): `affects` строкой JSON,
+ * перечислением через запятую или одним значением — к списку строк, числовой
+ * `id` — к строке, даты без пробелов по краям. Остальное — как было: его отвергнет
+ * проверка.
+ */
+export function coerceFact(fact: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...fact };
+
+  if ("affects" in out) out.affects = coerceStrings(out.affects);
+  if (typeof out.id === "number") out.id = String(out.id);
+  for (const date of ["since", "until"]) {
+    if (typeof out[date] === "string") out[date] = out[date].trim();
+  }
+
+  return out;
+}
+
+/**
+ * Список строк из строки JSON, перечисления через запятую или одного значения —
+ * как `coerceStrings` в гейтвее. Числа в списке становятся строками; объект или
+ * вложенный список строкой не притворится, и тогда значение остаётся как было.
+ */
+function coerceStrings(value: unknown): unknown {
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (raw === "") return [];
+
+    let parsed: unknown = null;
+    if (raw.startsWith("[")) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // не JSON — разберём как перечисление
+      }
+    }
+    if (!Array.isArray(parsed)) {
+      return raw
+        .split(/[,;]/)
+        .map((item) => item.trim())
+        .filter((item) => item !== "");
+    }
+    value = parsed;
+  }
+
+  if (!Array.isArray(value)) return value;
+
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") out.push(item.trim());
+    else if (typeof item === "number") out.push(String(item));
+    else return value;
+  }
+
+  return out;
+}
+
 /** Факты, у которых обязан быть срок: они временны по своей природе. */
 const DATED_KINDS = new Set(["injury", "life_event", "document"]);
 
@@ -124,6 +186,16 @@ export function validateFact(fact: Partial<Fact>): string | null {
   }
 
   if (!fact.since || !/^\d{4}-\d{2}-\d{2}$/.test(fact.since)) return "since must be YYYY-MM-DD";
+
+  // Не приведённое `coerceFact` записывать нельзя: такой факт уедет в каждый
+  // вызов гейтвея, и тот отвергнет вызов целиком.
+  if (
+    fact.affects !== undefined &&
+    (!Array.isArray(fact.affects) || fact.affects.some((a) => typeof a !== "string"))
+  ) {
+    return "affects must be a list of strings";
+  }
+  if (fact.id !== undefined && typeof fact.id !== "string") return "id must be a string";
 
   if (!fact.until) {
     if (fact.kind === "document") {
@@ -154,8 +226,19 @@ export function loadFacts(root: string, skill: string, today: string): FactStore
   store.facts ??= [];
   store.archived ??= [];
 
+  // Факты, записанные до CLT-074 с `affects` строкой или числовым `id`, чинятся
+  // при чтении: иначе старый инстанс так и слал бы их гейтвею, пока кто-то не
+  // поправит файл руками.
+  const before = JSON.stringify(store);
+  store.facts = store.facts.map((f) => coerceFact(f) as Fact);
+  store.archived = store.archived.map((f) => coerceFact(f) as Fact);
+  const repaired = JSON.stringify(store) !== before;
+
   const expired = store.facts.filter((f) => f.until && f.until < today);
-  if (expired.length === 0) return store;
+  if (expired.length === 0) {
+    if (repaired) writeJsonAtomic(path, store);
+    return store;
+  }
 
   const fresh: FactStore = {
     facts: store.facts.filter((f) => !(f.until && f.until < today)),

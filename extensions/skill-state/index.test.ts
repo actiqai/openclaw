@@ -1049,7 +1049,7 @@ describe("patch values sent as strings", () => {
     expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["tue", "sat"]);
 
     await call({ op: "patch", skill: "workout-plan", patch: { days: "вт, сб" } });
-    expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["вт", "сб"]);
+    expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["tue", "sat"]);
 
     await call({ op: "patch", skill: "workout-plan", patch: { days: [2, 6] } });
     expect((await call({ op: "get", skill: "workout-plan" })).profile.days).toEqual(["2", "6"]);
@@ -1060,5 +1060,137 @@ describe("patch values sent as strings", () => {
     expect(res.status).toBe("error");
     expect(res.message).toMatch(/silently/);
     expect(res.errors[0].field).toBe("minutes");
+  });
+});
+
+// Те же случаи, что `TestCoerceWeekdays` в гейтвее (GTW-069): разойдись инстанс и
+// гейтвей в понимании дня — и одна сторона строит неделю, которой нет у другой.
+describe("training days in free words (CLT-074)", () => {
+  const all = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  const cases: Array<[unknown, unknown[]]> = [
+    ["в любой день", all],
+    ["Все дни недели", all],
+    ["каждый день", all],
+    ["ежедневно", all],
+    ["по будням", ["mon", "tue", "wed", "thu", "fri"]],
+    ["выходные", ["sat", "sun"]],
+    ["Вт, сб", ["tue", "sat"]],
+    ["вт и сб", ["tue", "sat"]],
+    ['["tue","sat"]', ["tue", "sat"]],
+    ["понедельник, среду, пятницу", ["mon", "wed", "fri"]],
+    ["пн-пт", ["mon", "tue", "wed", "thu", "fri"]],
+    ["с пятницы по понедельник", ["mon", "fri", "sat", "sun"]],
+    ["Monday, Thursday", ["mon", "thu"]],
+    [["sat", "сб", "суббота"], ["sat"]],
+    ["вт, по настроению", ["tue", "по настроению"]],
+  ];
+
+  it.each(cases)("%j → %j", async (days, want) => {
+    const res = await call({ op: "patch", skill: "workout-plan", patch: { days } });
+
+    expect(res.status).toBe("ok");
+    expect(res.profile.days).toEqual(want);
+  });
+
+  it("builds a week out of «Вт» — the answer that used to give no reminders at all", async () => {
+    const res = await call({ op: "patch", skill: "workout-plan", patch: { days: "Вт" } });
+
+    expect(res.week).toHaveLength(1);
+    expect(res.week[0].weekday).toBe("tue");
+  });
+
+  it("repairs days written before the fix when reading the profile", async () => {
+    mkdirSync(join(root, "skills", "workout-plan"), { recursive: true });
+    writeFileSync(
+      join(root, "skills", "workout-plan", "profile.json"),
+      JSON.stringify({ days: ["в любой день"] }),
+      "utf8",
+    );
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+
+    expect(state.profile.days).toEqual(all);
+    expect(state.week).toHaveLength(7);
+  });
+});
+
+// Меню 22.10.2026: пять отказов гейтвея подряд `facts: expected a list of facts` —
+// факт с `affects` строкой и числовым `id`, записанный здесь как прислала модель.
+describe("facts with loose types (CLT-074)", () => {
+  const factsFile = () => join(root, "skills", "workout-plan", "facts.json");
+
+  it("stores `affects` sent as a string as a list, and a numeric id as a string", async () => {
+    const added = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { id: 3, text: "гастрит", kind: "constraint", affects: "острое, жареное" },
+    });
+
+    expect(added.status).toBe("ok");
+    expect(added.recorded.id).toBe("3");
+    expect(added.recorded.affects).toEqual(["острое", "жареное"]);
+
+    const single = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "колено", kind: "injury", until: "2100-01-01", affects: "бег" },
+    });
+    expect(single.recorded.affects).toEqual(["бег"]);
+
+    const json = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "спина", kind: "preference", affects: '["становая","тяга"]' },
+    });
+    expect(json.recorded.affects).toEqual(["становая", "тяга"]);
+  });
+
+  it("refuses `affects` that is no list of strings rather than storing it", async () => {
+    const res = await call({
+      op: "fact_add",
+      skill: "workout-plan",
+      fact: { text: "гастрит", kind: "constraint", affects: { food: "острое" } },
+    });
+
+    expect(res.status).toBe("error");
+    expect(res.message).toContain("affects");
+    expect(existsSync(factsFile())).toBe(false);
+  });
+
+  it("repairs a broken fact already on the instance when reading it", async () => {
+    mkdirSync(join(root, "skills", "workout-plan"), { recursive: true });
+    writeFileSync(
+      factsFile(),
+      JSON.stringify({
+        facts: [
+          {
+            id: 3,
+            text: "гастрит",
+            kind: "constraint",
+            since: "2026-10-01",
+            affects: "острое, жареное",
+          },
+        ],
+        archived: [
+          { id: 1, text: "нога", kind: "injury", since: "2026-01-01", until: "2026-02-01" },
+        ],
+      }),
+      "utf8",
+    );
+    await call({ op: "patch", skill: "workout-plan", patch: { goal: "lose", minutes: 45 } });
+
+    const state = await call({ op: "get", skill: "workout-plan" });
+
+    expect(state.call_payload.params.facts).toEqual([
+      expect.objectContaining({ id: "3", affects: ["острое", "жареное"] }),
+    ]);
+    const stored = JSON.parse(readFileSync(factsFile(), "utf8"));
+    expect(stored.facts[0].id).toBe("3");
+    expect(stored.facts[0].affects).toEqual(["острое", "жареное"]);
+    expect(stored.archived[0].id).toBe("1");
+
+    // Числовой id не находился по строке, и закрыть такой факт было нельзя.
+    const closed = await call({ op: "fact_close", skill: "workout-plan", fact_id: "3" });
+    expect(closed.facts).toHaveLength(0);
   });
 });
