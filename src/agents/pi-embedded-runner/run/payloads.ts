@@ -44,11 +44,45 @@ function isRecoverableToolError(error: string | undefined): boolean {
   return RECOVERABLE_TOOL_ERROR_KEYWORDS.some((keyword) => errorLower.includes(keyword));
 }
 
+const CRON_ADD_REJECTION_PREFIXES = [
+  "invalid cron.add params:",
+  "invalid schedule.at:",
+  "schedule.at is in the past:",
+  "schedule.at is too far in the future:",
+] as const;
+
+/**
+ * Ошибки «изменяющих» инструментов, о которых при `suppressToolErrors` человеку
+ * не пишем (`CLT-073`): модель видит ошибку и сама отвечает по-человечески.
+ *
+ * - `exec`: у нас это `curl` и разбор JSON, и человеку приходило
+ *   «⚠️ 🛠️ Exec: curl … failed: Command exited with code 77» поверх ответа;
+ * - `cron` `add`, отвергнутый проверкой параметров или времени: задача не
+ *   создана, менять нечего — модель переспросит время или повторит вызов.
+ *
+ * Неудачные `write`/`edit`, `message` и прочее по-прежнему сообщаются.
+ */
+function isQuietMutatingToolError(lastToolError: LastToolError): boolean {
+  const toolName = lastToolError.toolName.trim().toLowerCase();
+  if (toolName === "exec" || toolName === "bash") {
+    return true;
+  }
+  if (toolName !== "cron") {
+    return false;
+  }
+  const action = lastToolError.meta?.split(" · ")[0]?.trim().toLowerCase();
+  const error = (lastToolError.error ?? "").trim().toLowerCase();
+  return action === "add" && CRON_ADD_REJECTION_PREFIXES.some((prefix) => error.startsWith(prefix));
+}
+
 function shouldShowToolErrorWarning(params: {
   lastToolError: LastToolError;
   hasUserFacingReply: boolean;
   suppressToolErrors: boolean;
 }): boolean {
+  if (params.suppressToolErrors && isQuietMutatingToolError(params.lastToolError)) {
+    return false;
+  }
   const isMutatingToolError =
     params.lastToolError.mutatingAction ?? isLikelyMutatingToolName(params.lastToolError.toolName);
   if (isMutatingToolError) {

@@ -229,6 +229,69 @@ describe("buildEmbeddedRunPayloads", () => {
     expect(payloads[0]?.text).toContain("connection timeout");
   });
 
+  // `CLT-073`: человеку приходило «⚠️ 🛠️ Exec: curl … failed: Command exited with code 77»
+  // и «⚠️ ⏰ Cron: add · … failed: schedule.at is in the past» поверх ответа модели.
+  it("hides exec failures when messages.suppressToolErrors is enabled", () => {
+    const payloads = buildPayloads({
+      lastToolError: {
+        toolName: "exec",
+        meta: 'curl -s "https://api.open-meteo.com/v1/forecast"',
+        error: "Command exited with code 77",
+        mutatingAction: true,
+      },
+      config: { messages: { suppressToolErrors: true } },
+    });
+
+    expect(payloads).toHaveLength(0);
+  });
+
+  it("hides cron add rejected by validation when messages.suppressToolErrors is enabled", () => {
+    for (const error of [
+      "schedule.at is in the past: 2026-10-19T06:00:00.000Z (3 minutes ago). Current time: 2026-10-19T06:03:00.000Z",
+      "invalid cron.add params: at /delivery/mode: must be equal to one of the allowed values",
+    ]) {
+      const payloads = buildPayloads({
+        lastToolError: {
+          toolName: "cron",
+          meta: "add · Погладить вещи",
+          error,
+          mutatingAction: true,
+        },
+        config: { messages: { suppressToolErrors: true } },
+      });
+
+      expect(payloads).toHaveLength(0);
+    }
+  });
+
+  it("still shows other cron failures when messages.suppressToolErrors is enabled", () => {
+    for (const lastToolError of [
+      { toolName: "cron", meta: "add · Погладить вещи", error: "cron store write failed" },
+      { toolName: "cron", meta: "remove · job-1", error: "schedule.at is in the past: …" },
+    ]) {
+      const payloads = buildPayloads({
+        lastToolError: { ...lastToolError, mutatingAction: true },
+        config: { messages: { suppressToolErrors: true } },
+      });
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]?.isError).toBe(true);
+    }
+  });
+
+  it("still shows exec failures when messages.suppressToolErrors is off", () => {
+    const payloads = buildPayloads({
+      lastToolError: {
+        toolName: "exec",
+        error: "Command exited with code 77",
+        mutatingAction: true,
+      },
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.text).toContain("code 77");
+  });
+
   it("shows recoverable tool errors for mutating tools", () => {
     const payloads = buildPayloads({
       lastToolError: { toolName: "message", meta: "reply", error: "text required" },
