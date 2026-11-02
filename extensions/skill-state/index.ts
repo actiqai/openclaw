@@ -29,6 +29,7 @@ import {
 import {
   activeFacts,
   appendHistory,
+  coerceFact,
   dueItems,
   ensureRoot,
   expiredFacts,
@@ -175,7 +176,13 @@ const skillStatePlugin = {
       // Общие поля подмешиваются в профиль: рост, рассказанный скиллу питания,
       // обязан считаться известным и тренировкам, иначе человек рассказывает
       // о себе дважды и делает вывод, что его не слушают.
-      const profile = withShared(schema, readProfile(stateDir, skill), blocks);
+      //
+      // Приведение и при чтении (CLT-074): «Вт» или «в любой день», записанные до
+      // него, давали пустую неделю. Профиль чинится на лету, без правки файла.
+      const profile = coerceToSchema(
+        schema,
+        withShared(schema, readProfile(stateDir, skill), blocks),
+      );
 
       const { stage, missing, next_question } = stageOf(schema, profile);
       const ready = readyToCall(schema, profile);
@@ -515,11 +522,12 @@ const skillStatePlugin = {
           }
 
           case "fact_add": {
-            const incoming = {
+            // `affects` строкой, `id` числом — приводим, как гейтвей (CLT-074).
+            const incoming = coerceFact({
               since: today,
               source: "user",
-              ...((args.fact as Partial<Fact>) ?? {}),
-            };
+              ...((args.fact as Record<string, unknown>) ?? {}),
+            }) as Partial<Fact>;
 
             // Модель считает «сегодня» по своей таймзоне, инстанс — по UTC, и вечером
             // в Москве это разные дни. Факт, начинающийся «завтра» из-за этого сдвига,
