@@ -15,6 +15,14 @@
       "stateDir": {
         "type": "string",
         "description": "Where sealed connection blobs are kept (inside the backed-up volume); they go to <stateDir>/connections"
+      },
+      "skillsDir": {
+        "type": "string",
+        "description": "Where skill schemas from the gateway live (<skillsDir>/<skill>/schema.json); same as skill-state"
+      },
+      "workspaceDir": {
+        "type": "string",
+        "description": "Workspace with USER.md, rewritten when a shared profile block changes; default <stateDir>/../workspace"
       }
     }
   }

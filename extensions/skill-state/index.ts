@@ -1,11 +1,19 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { onSkillToolCall, setSessionOutboundTags } from "openclaw/plugin-sdk";
-import { RENDERED_BLOCKS, writeUserMd } from "./profile-view.js";
 import {
-  callPayload,
+  DEFAULT_SKILLS_DIR,
+  DEFAULT_STATE_DIR,
+  HISTORY_WINDOW,
+  RECENT_DAYS,
+  RECENT_EVENTS,
+  loadSchema as loadSchemaFrom,
+  saveSharedBlock,
+  sharedBlocks as sharedBlocksOf,
+  stateParams,
+} from "./call-state.js";
+import {
   mergeProfile,
   readyToCall,
   splitPatch,
@@ -59,18 +67,11 @@ import {
   validateFact,
   writeJsonAtomic,
   writeProfile,
-  writeShared,
   weekAhead,
   type Fact,
   type Override,
   type Pending,
 } from "./store.js";
-
-const DEFAULT_STATE_DIR = "/home/openclaw/.openclaw/actiq";
-const DEFAULT_SKILLS_DIR = "/opt/actiq-skills";
-
-/** Сколько последних событий уезжает в гейтвей вместе с вызовом. */
-const RECENT_EVENTS = 5;
 
 /**
  * Через сколько дней просрочки ожидание считается несданным отчётом.
@@ -79,18 +80,6 @@ const RECENT_EVENTS = 5;
  * значит врать статистике, по которой бот потом предлагает снизить нагрузку.
  */
 const MISS_AFTER_DAYS = 2;
-
-/**
- * Сколько дней предложенное считается свежим.
- *
- * Неделя: человек может любить блюдо и всё равно устать от него на четвёртый день,
- * а «надоело одно и то же» — главная причина, по которой перестают пользоваться
- * планом питания.
- */
-const RECENT_DAYS = 7;
-
-/** Сколько событий читается, чтобы собрать недавно предложенное. */
-const HISTORY_WINDOW = 40;
 
 // details — часть контракта тула в pi-agent-core: агент кладёт туда структурный
 // результат рядом с текстом. Нам нечего добавить к JSON, но поле обязательно.
@@ -134,37 +123,15 @@ const skillStatePlugin = {
      * и представление тихо отстанет от правды.
      */
     function saveShared(name: string, value: Record<string, unknown>): void {
-      writeShared(stateDir, name, value);
-
-      if (!RENDERED_BLOCKS.includes(name as (typeof RENDERED_BLOCKS)[number])) return;
-
-      writeUserMd(workspaceDir, {
-        person: readShared(stateDir, "person"),
-        body: readShared(stateDir, "body"),
-      });
+      saveSharedBlock(stateDir, workspaceDir, name, value);
     }
 
-    /** Схема приезжает с гейтвея рядом со SKILL.md — тот же файл проверяет вызов там. */
     function loadSchema(skill: string): SkillSchema | null {
-      const path = join(skillsDir, skill, "schema.json");
-      if (!existsSync(path)) return null;
-
-      try {
-        return JSON.parse(readFileSync(path, "utf8")) as SkillSchema;
-      } catch {
-        return null;
-      }
+      return loadSchemaFrom(skillsDir, skill);
     }
 
-    /** Общие блоки, объявленные схемой. */
     function sharedBlocks(schema: SkillSchema): Record<string, Record<string, unknown>> {
-      const blocks: Record<string, Record<string, unknown>> = {};
-
-      for (const name of schema.shared ?? []) {
-        blocks[name] = readShared(stateDir, name);
-      }
-
-      return blocks;
+      return sharedBlocksOf(stateDir, schema);
     }
 
     function snapshot(schema: SkillSchema, skill: string): Record<string, unknown> {
@@ -247,17 +214,9 @@ const skillStatePlugin = {
         call_payload: ready
           ? {
               action: schema.call.action,
-              params: {
-                profile: callPayload(schema, profile),
-                facts,
-                // Наверх едут и истёкшие документы: паспорт, истёкший вчера, —
-                // худший случай, и гейтвей должен о нём знать.
-                expired: expiredFacts(factStore, today).filter((f) => f.kind === "document"),
-                recent: events,
-                liked,
-                avoid: disliked,
-                recent_items: recentItems(window, RECENT_DAYS, localToday),
-              },
+              // То же, что skill-proxy прикладывает к вызову сам (CLT-075):
+              // одна функция на оба места, чтобы они не разошлись.
+              params: stateParams(stateDir, schema, skill, now),
             }
           : null,
       };

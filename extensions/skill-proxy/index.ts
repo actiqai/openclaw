@@ -9,8 +9,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { emitSkillToolCall } from "openclaw/plugin-sdk";
+import { DEFAULT_SKILLS_DIR } from "../skill-state/call-state.js";
+import { prepareParams, rememberAsks, type FillPaths } from "./fill.js";
 import { createToolCatalog, typedTool } from "./typed-tools.js";
 
 /**
@@ -104,9 +106,22 @@ const skillProxyPlugin = {
       "connections",
     );
     const stateDir = (api.pluginConfig?.stateDir as string) || DEFAULT_STATE_DIR;
+    // Те же пути, что у skill-state: профиль один, и USER.md рядом с ним.
+    const fillPaths: FillPaths = {
+      stateDir,
+      skillsDir: (api.pluginConfig?.skillsDir as string) || DEFAULT_SKILLS_DIR,
+      workspaceDir:
+        (api.pluginConfig?.workspaceDir as string) || join(dirname(stateDir), "workspace"),
+    };
 
     /** Один вызов скилла на гейтвее — общий для `call_skill` и типизированных инструментов. */
-    const callGateway = async (skill: string, action: string, params: Record<string, unknown>) => {
+    const callGateway = async (
+      skill: string,
+      action: string,
+      rawParams: Record<string, unknown>,
+    ) => {
+      let params = rawParams;
+
       // Единая точка входа: адрес один на всю платформу, скилл едет в теле.
       const url = `${gatewayBaseUrl}/v1/skill`;
 
@@ -123,6 +138,16 @@ const skillProxyPlugin = {
         connections = readConnections(connectionsDir);
       } catch (err) {
         api.logger.warn?.(`skill-proxy: cannot read connections: ${String(err)}`);
+      }
+
+      // Подстановка из профиля и состояние скилла (CLT-075) — для типизированных
+      // инструментов и для `call_skill` одинаково: старые напоминания в cron
+      // зовут `call_skill` без профиля, и им он нужен не меньше.
+      try {
+        const spec = tools.current().find((t) => t.skill === skill);
+        params = prepareParams(fillPaths, spec, skill, action, params);
+      } catch (err) {
+        api.logger.warn?.(`skill-proxy: cannot fill params from the profile: ${String(err)}`);
       }
 
       const body: Record<string, unknown> = { skill, action, params };
@@ -161,6 +186,13 @@ const skillProxyPlugin = {
       }
 
       const data = await response.json();
+
+      // Гейтвей велел спросить человека — запомним, куда записать ответ.
+      try {
+        rememberAsks(fillPaths, skill, data);
+      } catch (err) {
+        api.logger.warn?.(`skill-proxy: cannot remember the question: ${String(err)}`);
+      }
 
       if (data && typeof data === "object" && "connections" in data) {
         try {

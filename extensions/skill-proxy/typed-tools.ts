@@ -18,12 +18,18 @@ export type ToolParam = {
   minLength?: number;
   minimum?: number;
   maximum?: number;
+  /** Откуда подставить из профиля, если модель не передала (GTW-080). */
+  from?: string;
+  /** Что спросить у человека, если значения нет нигде. */
+  ask?: string;
 };
 
 export type ToolAction = {
   description: string;
   params: Record<string, ToolParam>;
   required?: string[];
+  /** Прикладывать к вызову состояние скилла из стора (GTW-080). */
+  state?: boolean;
 };
 
 export type ToolSpec = {
